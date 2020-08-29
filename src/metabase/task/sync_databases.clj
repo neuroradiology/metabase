@@ -16,7 +16,8 @@
              [sync-metadata :as sync-metadata]]
             [metabase.util
              [cron :as cron-util]
-             [i18n :refer [trs]]]
+             [i18n :refer [trs]]
+             [schema :as su]]
             [schema.core :as s]
             [toucan.db :as db])
   (:import metabase.models.database.DatabaseInstance
@@ -26,25 +27,31 @@
 ;;; |                                                   JOB LOGIC                                                    |
 ;;; +----------------------------------------------------------------------------------------------------------------+
 
-(s/defn ^:private job-context->database :- (s/maybe DatabaseInstance)
-  "Get the Database referred to in `job-context`. Returns `nil` if Database no longer exists. (Normally, a Database's
-  sync jobs *should* get deleted when the Database itself is deleted, but better to be safe here just in case.)"
+(s/defn ^:private job-context->database-id :- (s/maybe su/IntGreaterThanZero)
+  "Get the Database ID referred to in `job-context`."
   [job-context]
-  (Database (u/get-id (get (qc/from-job-data job-context) "db-id"))))
+  (u/get-id (get (qc/from-job-data job-context) "db-id")))
 
 ;; The DisallowConcurrentExecution on the two defrecords below attaches an annotation to the generated class that will
 ;; constrain the job execution to only be one at a time. Other triggers wanting the job to run will misfire.
 (jobs/defjob ^{org.quartz.DisallowConcurrentExecution true} SyncAndAnalyzeDatabase [job-context]
-  (when-let [database (job-context->database job-context)]
-    (sync-metadata/sync-db-metadata! database)
-    ;; only run analysis if this is a "full sync" database
-    (when (:is_full_sync database)
-      (analyze/analyze-db! database))))
+  (when-let [database-id (job-context->database-id job-context)]
+    (log/info (trs "Starting sync task for Database {0}." database-id))
+    (when-let [database (or (Database database-id)
+                            (log/warn (trs "Cannot sync Database {0}: Database does not exist." database-id)))]
+      (sync-metadata/sync-db-metadata! database)
+      ;; only run analysis if this is a "full sync" database
+      (when (:is_full_sync database)
+        (analyze/analyze-db! database)))))
 
 (jobs/defjob ^{org.quartz.DisallowConcurrentExecution true} UpdateFieldValues [job-context]
-  (when-let [database (job-context->database job-context)]
-    (when (:is_full_sync database)
-      (field-values/update-field-values! database))))
+  (when-let [database-id (job-context->database-id job-context)]
+    (log/info (trs "Update Field values task triggered for Database {0}." database-id))
+    (when-let [database (or (Database database-id)
+                            (log/warn "Cannot update Field values for Database {0}: Database does not exist." database-id))]
+      (if (:is_full_sync database)
+        (field-values/update-field-values! database)
+        (log/info (trs "Skipping update, automatic Field value updates are disabled for Database {0}." database-id))))))
 
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
@@ -110,15 +117,15 @@
   "Cancel a single sync task for `database-or-id` and `task-info`."
   [database :- DatabaseInstance, task-info :- TaskInfo]
   (let [trigger-key (trigger-key database task-info)]
-    (log/debug (u/format-color 'red "Unscheduling task for Database %d: trigger: %s"
-                               (u/get-id database) (.getName trigger-key)))
+    (log/debug (u/format-color 'red
+                   (trs "Unscheduling task for Database {0}: trigger: {1}" (u/get-id database) (.getName trigger-key))))
     (task/delete-trigger! trigger-key)))
 
 (s/defn unschedule-tasks-for-db!
   "Cancel *all* scheduled sync and FieldValues caching tasks for `database-or-id`."
   [database :- DatabaseInstance]
-  (delete-task! database sync-analyze-task-info)
-  (delete-task! database field-values-task-info))
+  (doseq [task [sync-analyze-task-info field-values-task-info]]
+    (delete-task! database task)))
 
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
@@ -150,26 +157,23 @@
    (triggers/with-schedule
      (cron/schedule
       (cron/cron-schedule (cron-schedule database task-info))
-      ;; If we miss a trigger, try again at the next opportunity, but only try it once. If we miss two triggers in a
-      ;; row (i.e. more than an hour goes by) then the job should still execute, but drop the additional occurrences
-      ;; of the same trigger (i.e. no need to run the job 3 times because it was missed three times, once is all we
-      ;; need)
-      (cron/with-misfire-handling-instruction-fire-and-proceed)))))
+      ;; if we miss a sync for one reason or another (such as system being down) do not try to run the sync again.
+      ;; Just wait until the next sync cycle.
+      ;;
+      ;; See https://www.nurkiewicz.com/2012/04/quartz-scheduler-misfire-instructions.html for more info
+      (cron/with-misfire-handling-instruction-do-nothing)))))
 
 (s/defn ^:private schedule-tasks-for-db!
   "Schedule a new Quartz job for `database` and `task-info`."
   [database :- DatabaseInstance]
   (let [sync-trigger (trigger database sync-analyze-task-info)
         fv-trigger   (trigger database field-values-task-info)]
-
     ;; unschedule any tasks that might already be scheduled
     (unschedule-tasks-for-db! database)
-
     (log/debug
      (u/format-color 'green "Scheduling sync/analyze and field-values task for database %d: trigger: %s and trigger: %s"
                      (u/get-id database) (.getName (.getKey sync-trigger))
                      (u/get-id database) (.getName (.getKey fv-trigger))))
-
     ;; now (re)schedule all the tasks
     (task/add-trigger! sync-trigger)
     (task/add-trigger! fv-trigger)))
@@ -186,10 +190,12 @@
   (task/add-job! sync-analyze-job)
   (task/add-job! field-values-job))
 
-(defmethod task/init! ::SyncDatabases [_]
+(defmethod task/init! ::SyncDatabases
+  [_]
   (job-init)
   (doseq [database (db/select Database)]
     (try
+      ;; TODO -- shouldn't all the triggers be scheduled already?
       (schedule-tasks-for-db! database)
       (catch Throwable e
-        (log/error e (trs "Failed to scheduler tasks for Database {0}" (:id database)))))))
+        (log/error e (trs "Failed to schedule tasks for Database {0}" (:id database)))))))

@@ -1,10 +1,10 @@
 **This guide will teach you:**
 
-* [How to compile your own copy of Metabase](#build-metabase)
-* [How to set up a development environment](#development-environment)
-* [How to run the Metabase Server](#development-server-quick-start)
-* [How to contribute back to the Metabase project](#contributing)
-* [How to add support in Metabase for other languages](#internationalization)
+- [How to compile your own copy of Metabase](#build-metabase)
+- [How to set up a development environment](#development-environment)
+- [How to run the Metabase Server](#development-server-quick-start)
+- [How to contribute back to the Metabase project](#contributing)
+- [How to add support in Metabase for other languages](#internationalization)
 
 # Contributing
 
@@ -24,10 +24,10 @@ If you have problems with your development environment, make sure that you are n
 
 These are the set of tools which are required in order to complete any build of the Metabase code. Follow the links to download and install them on your own before continuing.
 
-1. [Oracle JDK 8 (http://www.oracle.com/technetwork/java/javase/downloads/index.html)](http://www.oracle.com/technetwork/java/javase/downloads/index.html)
-2. [Node.js (http://nodejs.org/)](http://nodejs.org/)
-3. [Yarn package manager for Node.js](https://yarnpkg.com/)
-4. [Leiningen (http://leiningen.org/)](http://leiningen.org/)
+1. [Java Development Kit JDK (https://adoptopenjdk.net/releases.html)](https://adoptopenjdk.net/releases.html) - latest LTS version of JDK - more about [Java versions](./operations-guide/java-versions.md)
+2. [Node.js (http://nodejs.org/)](http://nodejs.org/) - latest LTS release
+3. [Yarn package manager for Node.js](https://yarnpkg.com/) - latest release of version 1.x
+4. [Leiningen (http://leiningen.org/)](http://leiningen.org/) - latest release
 
 If you are developing on Windows, make sure to use Ubuntu on Windows and follow instructions for Ubuntu/Linux instead of installing ordinary Windows versions.
 
@@ -69,7 +69,7 @@ $ yarn
 
 Run your backend development server with
 
-    lein ring server
+    lein run
 
 Start the frontend build process with
 
@@ -79,9 +79,9 @@ Start the frontend build process with
 
 We use these technologies for our FE build process to allow us to use modules, es6 syntax, and css variables.
 
-* webpack
-* babel
-* cssnext
+- webpack
+- babel
+- cssnext
 
 Frontend tasks are executed using `yarn`. All available tasks can be found in `package.json` under _scripts_.
 
@@ -104,6 +104,8 @@ There is also an option to reload changes on save without hot reloading if you p
 ```sh
 $ yarn build-watch
 ```
+
+Some systems may have trouble detecting changes to frontend files. You can enable filesystem polling by uncommenting the `watchOptions` clause in `webpack.config.js`. If you do this it may be worth making git ignore changes to webpack config, using `git update-index --assume-unchanged webpack.config.js`
 
 ### Frontend testing
 
@@ -135,10 +137,10 @@ The way integration tests are written is a little unconventional so here is an e
 import {
     useSharedAdminLogin,
     createTestStore,
-} from "__support__/e2e_tests";
+} from "__support__/e2e";
 import {
     click
-} from "__support__/enzyme_utils"
+} from "__support__/enzyme"
 
 import { mount } from "enzyme"
 
@@ -178,7 +180,7 @@ describe("Query builder", () => {
         store.debug();
 
         // For simulating user interactions like clicks and input events you should use methods defined
-        // in `enzyme_utils.js` as they abstract away some React/Redux complexities.
+        // in `enzyme.js` as they abstract away some React/Redux complexities.
         click(app.find(RunButton))
 
         // Note: In pretty rare cases where rendering the whole app is problematic or slow, you can just render a single
@@ -188,7 +190,7 @@ describe("Query builder", () => {
 })
 ```
 
-You can also skim through [`__support__/e2e_tests.js`](https://github.com/metabase/metabase/blob/master/frontend/test/__support__/e2e_tests.js) and [`__support__/enzyme_utils.js`](https://github.com/metabase/metabase/blob/master/frontend/test/__support__/enzyme_utils.js) to see all available methods.
+You can also skim through [`__support__/e2e.js`](https://github.com/metabase/metabase/blob/master/frontend/test/__support__/e2e.js) and [`__support__/enzyme.js`](https://github.com/metabase/metabase/blob/master/frontend/test/__support__/enzyme.js) to see all available methods.
 
 ### Jest unit tests
 
@@ -217,12 +219,6 @@ Leiningen and your REPL are the main development tools for the backend. There ar
 And of course your Jetty development server is available via
 
     lein run
-
-To automatically load backend namespaces when files are changed, you can instead run with
-
-    lein ring server
-
-`lein ring server` takes significantly longer to launch than `lein run`, so if you aren't working on backend code we'd recommend sticking to launching with `lein run`.
 
 ### Building drivers
 
@@ -293,12 +289,6 @@ You'll probably want to tell Emacs to store customizations in a different file. 
 
 ## Documentation
 
-#### Instant Cheatsheet
-
-Start up an instant cheatsheet for the project + dependencies by running
-
-    lein instant-cheatsheet
-
 ## Internationalization
 
 We are an application with lots of users all over the world. To help them use Metabase in their own language, we mark all of our strings as i18n.
@@ -307,14 +297,14 @@ We are an application with lots of users all over the world. To help them use Me
 
 If you need to add new strings (try to be judicious about adding copy) do the following:
 
-1. Tag strings in the frontend using `t` and `jt` ES6 template literals (see more details in https://c-3po.js.org/):
+1. Tag strings in the frontend using `t` and `jt` ES6 template literals (see more details in https://ttag.js.org/):
 
 ```javascript
 const someString = t`Hello ${name}!`;
 const someJSX = <div>{jt`Hello ${name}`}</div>;
 ```
 
-and in the backend using `trs` and related macros (see more details in https://github.com/puppetlabs/clj-i18n):
+and in the backend using `trs` (to use the site language) or `tru` (to use the current User's language):
 
 ```clojure
 (trs "Hello {0}!" name)
@@ -322,10 +312,10 @@ and in the backend using `trs` and related macros (see more details in https://g
 
 ### Translation errors or missing strings
 
-If you see incorrect or missing strings for your langauge, please visit our [POEditor project](https://poeditor.com/join/project/ynjQmwSsGh) and submit your fixes there.
+If you see incorrect or missing strings for your language, please visit our [POEditor project](https://poeditor.com/join/project/ynjQmwSsGh) and submit your fixes there.
 
 ## License
 
-Copyright © 2017 Metabase, Inc
+Copyright © 2020 Metabase, Inc.
 
 Distributed under the terms of the GNU Affero General Public License (AGPL) except as otherwise noted. See individual files for details.

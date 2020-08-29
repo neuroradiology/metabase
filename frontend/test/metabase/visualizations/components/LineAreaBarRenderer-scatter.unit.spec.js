@@ -1,10 +1,12 @@
-import "__support__/mocks"; // included explicitly whereas with e2e tests it comes with __support__/e2e_tests
+import "__support__/mocks"; // included explicitly whereas with e2e tests it comes with __support__/e2e
 
 import {
   NumberColumn,
   dispatchUIEvent,
   renderLineAreaBar,
   getFormattedTooltips,
+  createFixture,
+  cleanupFixture,
 } from "../__support__/visualizations";
 
 const DEFAULT_SETTINGS = {
@@ -24,15 +26,11 @@ describe("LineAreaBarRenderer-scatter", () => {
   ];
 
   beforeEach(function() {
-    document.body.insertAdjacentHTML(
-      "afterbegin",
-      '<div id="fixture" style="height: 800px; width: 1200px;">',
-    );
-    element = document.getElementById("fixture");
+    element = createFixture();
   });
 
   afterEach(function() {
-    document.body.removeChild(document.getElementById("fixture"));
+    cleanupFixture(element);
   });
 
   it("should render a scatter chart with 2 dimensions", () => {

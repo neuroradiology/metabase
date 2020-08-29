@@ -1,13 +1,13 @@
 /* @flow */
 
-import { t } from "c-3po";
+import { t } from "ttag";
 import { TYPE, isa } from "metabase/lib/types";
 import _ from "underscore";
 
 import type {
   ClickAction,
   ClickActionProps,
-} from "metabase/meta/types/Visualization";
+} from "metabase-types/types/Visualization";
 
 const BLACKLIST_TYPES = [
   TYPE.PK,

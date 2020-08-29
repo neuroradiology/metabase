@@ -4,11 +4,6 @@ import { shallow } from "enzyme";
 import RecipientPicker from "metabase/pulse/components/RecipientPicker";
 import TokenField from "metabase/components/TokenField";
 
-// We have to do some mocking here to avoid calls to GA and to Metabase settings
-jest.mock("metabase/lib/settings", () => ({
-  get: () => "v",
-}));
-
 global.ga = jest.fn();
 
 const TEST_USERS = [

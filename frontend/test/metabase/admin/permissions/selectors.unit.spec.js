@@ -10,28 +10,17 @@ import { setIn } from "icepick";
 jest.mock("metabase/lib/analytics");
 jest.mock("metabase/containers/CollectionSelect");
 
-import { GroupsPermissions } from "metabase/meta/types/Permissions";
 import { normalizedMetadata } from "./selectors.unit.spec.fixtures";
 import {
   getTablesPermissionsGrid,
   getSchemasPermissionsGrid,
   getDatabasesPermissionsGrid,
+  getDatabaseTablesOrSchemasPath,
 } from "metabase/admin/permissions/selectors";
 
 /******** INITIAL TEST STATE ********/
 
-const groups = [
-  {
-    id: 1,
-    name: "Group starting with full access",
-  },
-  {
-    id: 2,
-    name: "Group starting with no access at all",
-  },
-];
-
-const initialPermissions: GroupsPermissions = {
+const initialPermissions = {
   1: {
     // Sample dataset
     1: {
@@ -75,7 +64,6 @@ const initialState = {
     permissions: {
       permissions: initialPermissions,
       originalPermissions: initialPermissions,
-      groups,
     },
   },
   entities: normalizedMetadata,
@@ -200,7 +188,7 @@ describe("permissions selectors", () => {
     // for databases where the metadata value for table schema is `null`
     const schemalessDataset = getMethodsForDbAndSchema({
       databaseId: 3,
-      schemaName: "",
+      schemaName: null,
     });
 
     it("should restrict access correctly on table level", () => {
@@ -610,5 +598,35 @@ describe("permissions selectors", () => {
         schemas: "all",
       });
     });
+  });
+});
+
+describe("getDatabaseTablesOrSchemasPath", () => {
+  it("should return path for schema-less db", () => {
+    const database = { id: 1, schemaNames: () => [null] };
+    expect(getDatabaseTablesOrSchemasPath(database)).toBe(
+      "/admin/permissions/databases/1/tables",
+    );
+  });
+
+  it("should return path for db with no schemas", () => {
+    const database = { id: 1, schemaNames: () => [] };
+    expect(getDatabaseTablesOrSchemasPath(database)).toBe(
+      "/admin/permissions/databases/1/schemas",
+    );
+  });
+
+  it("should return path for db with a single schema", () => {
+    const database = { id: 1, schemaNames: () => ["foo"] };
+    expect(getDatabaseTablesOrSchemasPath(database)).toBe(
+      "/admin/permissions/databases/1/schemas/foo/tables",
+    );
+  });
+
+  it("should return path for db with multiple schemas", () => {
+    const database = { id: 1, schemaNames: () => ["foo", "bar"] };
+    expect(getDatabaseTablesOrSchemasPath(database)).toBe(
+      "/admin/permissions/databases/1/schemas",
+    );
   });
 });

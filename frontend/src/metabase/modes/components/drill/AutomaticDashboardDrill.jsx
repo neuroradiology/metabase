@@ -1,11 +1,11 @@
 /* @flow */
 
 import StructuredQuery from "metabase-lib/lib/queries/StructuredQuery";
-import { t } from "c-3po";
+import { t } from "ttag";
 import type {
   ClickAction,
   ClickActionProps,
-} from "metabase/meta/types/Visualization";
+} from "metabase-types/types/Visualization";
 
 import MetabaseSettings from "metabase/lib/settings";
 
@@ -20,7 +20,7 @@ export default ({ question, clicked }: ClickActionProps): ClickAction[] => {
   if (
     !clicked ||
     dimensions.length === 0 ||
-    !MetabaseSettings.get("enable_xrays")
+    !MetabaseSettings.get("enable-xrays")
   ) {
     return [];
   }

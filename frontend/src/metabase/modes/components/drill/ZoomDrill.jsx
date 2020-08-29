@@ -5,8 +5,8 @@ import { drillDownForDimensions } from "metabase/modes/lib/actions";
 import type {
   ClickAction,
   ClickActionProps,
-} from "metabase/meta/types/Visualization";
-import { t } from "c-3po";
+} from "metabase-types/types/Visualization";
+import { t } from "ttag";
 
 export default ({
   question,
