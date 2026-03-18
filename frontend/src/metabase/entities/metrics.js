@@ -1,44 +1,54 @@
-import { createEntity } from "metabase/lib/entities";
-
-import { MetricSchema } from "metabase/schema";
+import {
+  metricApi,
+  useGetMetricQuery,
+  useListMetricsQuery,
+} from "metabase/api";
 import { color } from "metabase/lib/colors";
-import * as Urls from "metabase/lib/urls";
-
+import { createEntity, entityCompatibleQuery } from "metabase/lib/entities";
+import { MetricSchema } from "metabase/schema";
 import { getMetadata } from "metabase/selectors/metadata";
 
-const Metrics = createEntity({
+/**
+ * @deprecated use "metabase/api" instead
+ */
+export const Metrics = createEntity({
   name: "metrics",
   nameOne: "metric",
   path: "/api/metric",
   schema: MetricSchema,
 
-  objectActions: {
-    setArchived: (
-      { id },
-      archived,
-      { revision_message = archived ? "(Archive)" : "(Unarchive)" } = {},
-    ) => Metrics.actions.update({ id }, { archived, revision_message }),
-
-    // NOTE: DELETE not currently implemented
-    // $FlowFixMe: no official way to disable builtin actions yet
-    delete: null,
+  rtk: {
+    getUseGetQuery: () => ({
+      useGetQuery,
+    }),
+    useListQuery: useListMetricsQuery,
   },
 
-  objectSelectors: {
-    getName: metric => metric && metric.name,
-    getUrl: metric =>
-      Urls.tableRowsQuery(metric.database_id, metric.table_id, metric.id),
-    getColor: metric => color("accent1"),
-    getIcon: metric => "sum",
+  api: {
+    list: (entityQuery, dispatch) =>
+      entityCompatibleQuery(
+        entityQuery,
+        dispatch,
+        metricApi.endpoints.listMetrics,
+      ),
+    get: (entityQuery, options, dispatch) =>
+      entityCompatibleQuery(
+        entityQuery.id,
+        dispatch,
+        metricApi.endpoints.getMetric,
+      ),
   },
 
   selectors: {
     getObject: (state, { entityId }) => getMetadata(state).metric(entityId),
   },
 
-  form: {
-    fields: [{ name: "name" }, { name: "description", type: "text" }],
+  objectSelectors: {
+    getName: (metric) => metric && metric.name,
+    getColor: () => color("summarize"),
   },
 });
 
-export default Metrics;
+const useGetQuery = ({ id }, options) => {
+  return useGetMetricQuery(id, options);
+};

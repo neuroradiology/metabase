@@ -1,44 +1,25 @@
-/* @flow */
-
-import React from "react";
-
+/* eslint-disable react/prop-types */
 import { t } from "ttag";
 
-import EmptyState from "metabase/components/EmptyState";
-
-import { getSettingDefintionsForColumn } from "metabase/visualizations/lib/settings/column";
-import {
-  getSettingsWidgets,
-  getComputedSettings,
-} from "metabase/visualizations/lib/settings";
-
-import ChartSettingsWidget from "metabase/visualizations/components/ChartSettingsWidget";
 import NoResults from "assets/img/no_results.svg";
+import { EmptyState } from "metabase/common/components/EmptyState";
+import ChartSettingsWidget from "metabase/visualizations/components/ChartSettingsWidget";
+import {
+  getComputedSettings,
+  getSettingsWidgets,
+} from "metabase/visualizations/lib/settings";
+import { getSettingDefinitionsForColumn } from "metabase/visualizations/lib/settings/column";
 
-type SettingId = string;
-type Settings = { [id: SettingId]: any };
-
-type Props = {
-  value: Settings,
-  onChange: (settings: Settings) => void,
-  column: any,
-  whitelist?: Set<SettingId>,
-  blacklist?: Set<SettingId>,
-  inheritedSettings?: Settings,
-  noReset?: boolean,
-};
-
-const ColumnSettings = ({
-  value,
-  onChange,
+function getWidgets({
   column,
-  whitelist,
-  blacklist,
-  inheritedSettings = {},
-  noReset = false,
-}: Props) => {
-  const storedSettings = value || {};
-
+  inheritedSettings,
+  storedSettings,
+  onChange,
+  onChangeSetting,
+  allowlist,
+  denylist,
+  extraData,
+}) {
   // fake series
   const series = [{ card: {}, data: { rows: [], cols: [] } }];
 
@@ -47,13 +28,13 @@ const ColumnSettings = ({
     column = { ...column, unit: "default" };
   }
 
-  const settingsDefs = getSettingDefintionsForColumn(series, column);
+  const settingsDefs = getSettingDefinitionsForColumn(series, column);
 
   const computedSettings = getComputedSettings(
     settingsDefs,
     column,
     { ...inheritedSettings, ...storedSettings },
-    { series },
+    { series, ...extraData },
   );
 
   const widgets = getSettingsWidgets(
@@ -61,28 +42,48 @@ const ColumnSettings = ({
     storedSettings,
     computedSettings,
     column,
-    changedSettings => {
-      onChange({ ...storedSettings, ...changedSettings });
+    (changedSettings) => {
+      if (onChange) {
+        onChange({ ...storedSettings, ...changedSettings });
+      }
+      if (onChangeSetting) {
+        onChangeSetting(changedSettings);
+      }
     },
-    { series },
-  ).filter(
-    widget =>
-      (!whitelist || whitelist.has(widget.id)) &&
-      (!blacklist || !blacklist.has(widget.id)),
+    { series, ...extraData },
   );
 
+  return widgets.filter(
+    (widget) =>
+      (!allowlist || allowlist.has(widget.id)) &&
+      (!denylist || !denylist.has(widget.id)),
+  );
+}
+
+export function hasColumnSettingsWidgets({ value, ...props }) {
+  const storedSettings = value || {};
+  return getWidgets({ storedSettings, ...props }).length > 0;
+}
+
+export const ColumnSettings = ({
+  style,
+  value,
+  variant = "default",
+  ...props
+}) => {
+  const storedSettings = value || {};
+  const widgets = getWidgets({ storedSettings, ...props });
+
   return (
-    <div style={{ maxWidth: 300 }}>
+    <div style={{ maxWidth: 300, ...style }} data-testid="column-settings">
       {widgets.length > 0 ? (
-        widgets.map(widget => (
+        widgets.map((widget) => (
           <ChartSettingsWidget
             key={widget.id}
             {...widget}
-            // FIXME: this is to force all settings to be visible but causes irrelevant settings to be shown
-            hidden={false}
             unset={storedSettings[widget.id] === undefined}
             noPadding
-            noReset={noReset || widget.noReset}
+            variant={variant}
           />
         ))
       ) : (
@@ -94,5 +95,3 @@ const ColumnSettings = ({
     </div>
   );
 };
-
-export default ColumnSettings;

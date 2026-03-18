@@ -1,10 +1,10 @@
-import React from "react";
-
+/* eslint-disable react/prop-types */
 import { t } from "ttag";
-import { duration } from "metabase/lib/formatting";
 
-import Tooltip from "metabase/components/Tooltip";
-import RunButton from "./RunButton";
+import { duration } from "metabase/lib/formatting";
+import { Tooltip } from "metabase/ui";
+
+import { RunButton } from "./RunButton";
 
 const REFRESH_TOOLTIP_THRESHOLD = 30 * 1000; // 30 seconds
 
@@ -19,12 +19,13 @@ const defaultGetTooltip = ({ isDirty, result }) => {
     : null;
 };
 
-export default function RunButtonWithTooltip({
+export function RunButtonWithTooltip({
   getTooltip = defaultGetTooltip,
   ...props
 }) {
+  const tooltip = getTooltip(props);
   return (
-    <Tooltip tooltip={getTooltip(props)}>
+    <Tooltip label={tooltip} disabled={!tooltip} position="top">
       <RunButton {...props} />
     </Tooltip>
   );

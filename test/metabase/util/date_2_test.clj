@@ -1,18 +1,21 @@
 (ns metabase.util.date-2-test
-  (:require [clojure
-             [string :as str]
-             [test :refer :all]]
-            [java-time :as t]
-            [metabase.test :as mt]
-            [metabase.test.util.timezone :as tu.timezone]
-            [metabase.util.date-2 :as u.date]
-            [metabase.util.date-2.common :as u.date.common])
-  (:import java.time.temporal.ChronoField))
+  (:require
+   [clojure.string :as str]
+   [clojure.test :refer :all]
+   [java-time.api :as t]
+   [metabase.test :as mt]
+   [metabase.test.util.timezone :as test.tz]
+   [metabase.util.date-2 :as u.date]
+   [metabase.util.date-2.common :as u.date.common])
+  (:import
+   (java.time.temporal ChronoField)))
+
+(set! *warn-on-reflection* true)
 
 (deftest parse-test
   ;; system timezone should not affect the way strings are parsed
   (doseq [system-timezone-id ["UTC" "US/Pacific"]]
-    (tu.timezone/with-system-timezone-id system-timezone-id
+    (test.tz/with-system-timezone-id! system-timezone-id
       (letfn [(message [expected s default-timezone-id]
                 (if default-timezone-id
                   (format "parsing '%s' with default timezone id '%s' should give you %s" s default-timezone-id (pr-str expected))
@@ -134,28 +137,83 @@
             "Passing `nil` should return `nil`"))
       (testing "blank strings"
         (is (= nil
-               (u.date/parse ""))
-            (= nil
+               (u.date/parse "")))
+        (is (= nil
                (u.date/parse "   ")))))))
 
 ;; TODO - more tests!
-(deftest format-test
-  (testing "ZonedDateTime"
-    (testing "should get formatted as the same way as an OffsetDateTime"
-      (is (= "2019-11-01T18:39:00-07:00"
-             (u.date/format (t/zoned-date-time "2019-11-01T18:39:00-07:00[US/Pacific]")))))
-    (testing "make sure it can handle different DST offsets correctly"
-      (is (= "2020-02-13T16:31:00-08:00"
-             (u.date/format (t/zoned-date-time "2020-02-13T16:31:00-08:00[US/Pacific]"))))))
-  (testing "Instant"
-    (is (= "1970-01-01T00:00:00Z"
-           (u.date/format (t/instant "1970-01-01T00:00:00Z")))))
-  (testing "nil"
-    (is (= nil
-           (u.date/format nil))
-        "Passing `nil` should return `nil`")))
+(deftest ^:parallel format-test
+  (are
+   [expected input]
+   (= expected (u.date/format input))
+    "2019-06-05T18:39:00-07:00" (t/zoned-date-time "2019-06-05T18:39:00-07:00[US/Pacific]")
+    "2019-11-05T18:39:00-08:00" (t/zoned-date-time "2019-11-05T18:39:00-08:00[US/Pacific]")
+    "2019-06-05T18:39:00-07:00" (t/offset-date-time "2019-06-05T18:39:00-07:00")
+    "18:39:00-07:00"            (t/offset-time "18:39:00-07:00")
+    "2019-06-05T19:27:00"       (t/local-date-time "2019-06-05T19:27")
+    "2019-06-05"                (t/local-date "2019-06-05")
+    "2019-06-30"                (t/local-date "2019-06-30")
+    "14:30:30"                  (t/local-time "14:30:30")
+    "2019-06-05T00:00:00Z"      (t/instant "2019-06-05T00:00:00Z")
+    nil                         nil))
 
-(deftest format-sql-test
+(deftest ^:parallel format-rfc3339-test
+  (are
+   [expected input]
+   (= expected (u.date/format-rfc3339 input))
+    "2019-06-05T18:39:00.00-07:00" (t/zoned-date-time "2019-06-05T18:39:00-07:00[US/Pacific]")
+    "2019-11-05T18:39:00.00-08:00" (t/zoned-date-time "2019-11-05T18:39:00-08:00[US/Pacific]")
+    "2019-06-05T18:39:00.00-07:00" (t/offset-date-time "2019-06-05T18:39:00-07:00")
+    "2019-06-05T19:27:00.00Z"      (t/local-date-time "2019-06-05T19:27")
+    "2019-06-05T00:00:00.00Z"      (t/local-date "2019-06-05")
+    "2019-06-05T00:00:00.00Z"      (t/instant "2019-06-05T00:00:00Z")
+    nil                            nil))
+
+(deftest ^:parallel format-human-readable-test
+  ;; strings are localized slightly differently on different JVMs. For places where there are multiple possible
+  ;; correct results, we'll use a set with all the possibilities below and check membership
+  (doseq [[t expected] {#t "2021-04-02T14:42:09.524392-07:00[US/Pacific]" ; ZonedDateTime
+                        {:en-US #{"April 2, 2021 2:42:09 PM (Pacific Daylight Time)"
+                                  "April 2, 2021, 2:42:09 PM (Pacific Daylight Time)"}
+                         :es-MX #{"2 de abril de 2021 02:42:09 PM (Hora de verano del Pacífico)"
+                                  "2 de abril de 2021 14:42:09 (Hora de verano del Pacífico)"
+                                  "2 de abril de 2021 14:42:09 (hora de verano del Pacífico)"
+                                  "2 de abril de 2021, 14:42:09 (Hora de verano del Pacífico)"}}
+
+                        #t "2021-04-02T14:42:09.524392-07:00" ; OffsetDateTime
+                        {:en-US #{"April 2, 2021 2:42:09 PM (GMT-07:00)"
+                                  "April 2, 2021, 2:42:09 PM (GMT-07:00)"}
+                         :es-MX #{"2 de abril de 2021 02:42:09 PM (GMT-07:00)"
+                                  "2 de abril de 2021 14:42:09 (GMT-07:00)"}}
+
+                        #t "2021-04-02T14:42:09.524392" ; LocalDateTime
+                        {:en-US #{"April 2, 2021 2:42:09 PM"
+                                  "April 2, 2021, 2:42:09 PM"}
+                         :es-MX #{"2 de abril de 2021 02:42:09 PM"
+                                  "2 de abril de 2021 14:42:09"}}
+
+                        #t "2021-04-02" ; LocalDate
+                        {:en-US "April 2, 2021"
+                         :es-MX "2 de abril de 2021"}
+
+                        #t "14:42:09.524392-07:00" ; OffsetTime
+                        {:en-US "2:42:09 PM (GMT-07:00)"
+                         :es-MX #{"02:42:09 PM (GMT-07:00)"
+                                  "14:42:09 (GMT-07:00)"}}
+
+                        #t "14:42:09.524392" ; LocalTime
+                        {:en-US "2:42:09 PM"
+                         :es-MX #{"02:42:09 PM"
+                                  "14:42:09"}}}
+          [locale expected] expected]
+    (mt/with-user-locale locale
+      (testing (format "%s %s" (.getCanonicalName (class t)) (pr-str t))
+        (let [actual (str/replace (u.date/format-human-readable t) \u202f \space)]
+          (if (set? expected)
+            (is (contains? expected actual))
+            (is (= expected actual))))))))
+
+(deftest ^:parallel format-sql-test
   (testing "LocalDateTime"
     (is (= "2019-11-05 19:27:00"
            (u.date/format-sql (t/local-date-time "2019-11-05T19:27")))))
@@ -164,14 +222,11 @@
            (u.date/format-sql (t/zoned-date-time "2019-11-01T18:39:00-07:00[US/Pacific]")))
         "should get formatted as the same way as an OffsetDateTime")))
 
-(deftest adjuster-test
+(deftest ^:parallel adjuster-test
   (let [now (t/zoned-date-time "2019-12-10T17:17:00-08:00[US/Pacific]")]
     (testing "adjust temporal value to first day of week (Sunday)"
       (is (= (t/zoned-date-time "2019-12-08T17:17-08:00[US/Pacific]")
              (t/adjust now (u.date/adjuster :first-day-of-week)))))
-    (testing "adjust temporal value to first day of ISO week (Monday)"
-      (is (= (t/zoned-date-time "2019-12-09T17:17-08:00[US/Pacific]")
-             (t/adjust now (u.date/adjuster :first-day-of-iso-week)))))
     (testing "adjust temporal value to first day of first week of year (previous or same Sunday as first day of year)"
       (is (= (t/zoned-date-time "2018-12-30T17:17-08:00[US/Pacific]")
              (t/adjust now (u.date/adjuster :first-week-of-year))
@@ -180,7 +235,7 @@
       (is (= (t/zoned-date-time "2019-12-08T17:17-08:00[US/Pacific]")
              (t/adjust now (u.date/adjuster :week-of-year 50)))))))
 
-(deftest extract-test
+(deftest ^:parallel extract-test
   (testing "u.date/extract with 2 args"
     ;; everything is at `Sunday October 27th 2019 2:03:40.555 PM` or subset thereof
     (let [temporal-category->sample-values {:dates     [(t/local-date 2019 10 27)]
@@ -191,11 +246,9 @@
       (doseq [[categories unit->expected] {#{:times :datetimes} {:minute-of-hour 3
                                                                  :hour-of-day    14}
                                            #{:dates :datetimes} {:day-of-week      1
-                                                                 :iso-day-of-week  7
                                                                  :day-of-month     27
                                                                  :day-of-year      300
                                                                  :week-of-year     44
-                                                                 :iso-week-of-year 43
                                                                  :month-of-year    10
                                                                  :quarter-of-year  4
                                                                  :year             2019}}
@@ -206,11 +259,26 @@
                (u.date/extract t unit))
             (format "Extract %s from %s %s should be %s" unit (class t) t expected)))))
   (testing "u.date/extract with 1 arg (extract from now)"
-    (is (= 2
-           (t/with-clock (t/mock-clock (t/instant "2019-11-18T22:31:00Z"))
+    (mt/with-clock (t/mock-clock (t/instant "2019-11-18T22:31:00Z"))
+      (is (= 2
              (u.date/extract :day-of-week))))))
 
-(deftest truncate-test
+(deftest extract-start-of-week-test
+  (testing "`extract` `:day-of-week` and `:week-of-year` should respect the `start-of-week` Setting (#14294)"
+    (doseq [[first-day-of-week unit->expected] {"sunday"    {:week-of-year 9, :day-of-week 3}
+                                                "monday"    {:week-of-year 9, :day-of-week 2}
+                                                "tuesday"   {:week-of-year 9, :day-of-week 1}
+                                                "wednesday" {:week-of-year 8, :day-of-week 7}
+                                                "thursday"  {:week-of-year 8, :day-of-week 6}
+                                                "friday"    {:week-of-year 8, :day-of-week 5}
+                                                "saturday"  {:week-of-year 9, :day-of-week 4}}
+            unit [:week-of-year :day-of-week]]
+      (mt/with-temporary-setting-values [start-of-week first-day-of-week]
+        (testing (pr-str (list 'u.date/extract (symbol "#_Tuesday") #t "2021-02-23" unit))
+          (is (= (get unit->expected unit)
+                 (u.date/extract #t "2021-02-23" unit))))))))
+
+(deftest ^:parallel truncate-test
   (testing "u.date/truncate with 2 args"
     (let [t->unit->expected
           {(t/local-date 2019 10 27)
@@ -219,7 +287,6 @@
             :hour     (t/local-date 2019 10 27)
             :day      (t/local-date 2019 10 27)
             :week     (t/local-date 2019 10 27)
-            :iso-week (t/local-date 2019 10 21)
             :month    (t/local-date 2019 10 1)
             :quarter  (t/local-date 2019 10 1)
             :year     (t/local-date 2019 1 1)}
@@ -240,7 +307,6 @@
             :hour     (t/offset-date-time 2019 10 27 14 0  0 0 (t/zone-offset -7))
             :day      (t/offset-date-time 2019 10 27 0  0  0 0 (t/zone-offset -7))
             :week     (t/offset-date-time 2019 10 27 0  0  0 0 (t/zone-offset -7))
-            :iso-week (t/offset-date-time 2019 10 21 0  0  0 0 (t/zone-offset -7))
             :month    (t/offset-date-time 2019 10  1 0  0  0 0 (t/zone-offset -7))
             :quarter  (t/offset-date-time 2019 10  1 0  0  0 0 (t/zone-offset -7))
             :year     (t/offset-date-time 2019  1  1 0  0  0 0 (t/zone-offset -7))}
@@ -251,7 +317,6 @@
             :hour     (t/zoned-date-time  2019 10 27 14 0  0 0 (t/zone-id "America/Los_Angeles"))
             :day      (t/zoned-date-time  2019 10 27  0 0  0 0 (t/zone-id "America/Los_Angeles"))
             :week     (t/zoned-date-time  2019 10 27  0 0  0 0 (t/zone-id "America/Los_Angeles"))
-            :iso-week (t/zoned-date-time  2019 10 21  0 0  0 0 (t/zone-id "America/Los_Angeles"))
             :month    (t/zoned-date-time  2019 10  1  0 0  0 0 (t/zone-id "America/Los_Angeles"))
             :quarter  (t/zoned-date-time  2019 10  1  0 0  0 0 (t/zone-id "America/Los_Angeles"))
             :year     (t/zoned-date-time  2019  1  1  0 0  0 0 (t/zone-id "America/Los_Angeles"))}}]
@@ -261,14 +326,33 @@
                (u.date/truncate t unit))
             (format "Truncate %s %s to %s should be %s" (class t) t unit expected)))))
   (testing "u.date/truncate with 1 arg (truncate now)"
-    (is (= (t/zoned-date-time "2019-11-18T00:00Z[UTC]")
-           (t/with-clock (t/mock-clock (t/instant "2019-11-18T22:31:00Z"))
+    (mt/with-clock (t/mock-clock (t/instant "2019-11-18T22:31:00Z"))
+      (is (= (t/zoned-date-time "2019-11-18T00:00Z[UTC]")
              (u.date/truncate :day))))))
 
-(deftest add-test
+(deftest truncate-start-of-week-test
+  (testing "`truncate` to `:week` should respect the `start-of-week` Setting (#14294)"
+    (doseq [[first-day-of-week expected] {"sunday"    #t "2021-02-21"
+                                          "monday"    #t "2021-02-22"
+                                          "tuesday"   #t "2021-02-23"
+                                          "wednesday" #t "2021-02-17"
+                                          "thursday"  #t "2021-02-18"
+                                          "friday"    #t "2021-02-19"
+                                          "saturday"  #t "2021-02-20"}]
+      (mt/with-temporary-setting-values [start-of-week first-day-of-week]
+        (is (= expected
+               (u.date/truncate #_Tuesday #t "2021-02-23" :week)))))))
+
+(deftest ^:parallel bucket-test
+  (are [unit expected] (= expected
+                          (u.date/bucket #t "2024-01-03" unit))
+    :month         #t "2024-01-01"
+    :month-of-year 1))
+
+(deftest ^:parallel add-test
   (testing "with 2 args (datetime relative to now)"
-    (is (= (t/zoned-date-time "2019-11-20T22:31Z[UTC]")
-           (t/with-clock (t/mock-clock (t/instant "2019-11-18T22:31:00Z"))
+    (mt/with-clock (t/mock-clock (t/instant "2019-11-18T22:31:00Z"))
+      (is (= (t/zoned-date-time "2019-11-20T22:31Z[UTC]")
              (u.date/add :day 2)))))
   (testing "with 3 args"
     (let [t (t/zoned-date-time "2019-06-14T00:00:00.000Z[UTC]")]
@@ -284,11 +368,11 @@
                (u.date/add t unit n))
             (format "%s plus %d %ss should be %s" t n unit expected))))))
 
-(deftest range-test
+(deftest ^:parallel range-test
   (testing "with 1 arg (range relative to now)"
     (is (= {:start (t/zoned-date-time "2019-11-17T00:00Z[UTC]")
             :end   (t/zoned-date-time "2019-11-24T00:00Z[UTC]")}
-           (t/with-clock (t/mock-clock (t/instant "2019-11-18T22:31:00Z"))
+           (mt/with-clock (t/mock-clock (t/instant "2019-11-18T22:31:00Z"))
              (u.date/range :week)))))
   (testing "with 2 args"
     (is (= {:start (t/zoned-date-time "2019-10-27T00:00Z[UTC]")
@@ -305,7 +389,7 @@
       (is (= {:start (t/local-date "2019-11-01"), :end (t/local-date "2019-11-30")}
              (u.date/range (t/local-date "2019-11-18") :month {:end :inclusive, :resolution :day}))))))
 
-(deftest comparison-range-test
+(deftest ^:parallel comparison-range-test
   (testing "Comparing MONTH"
     (letfn [(comparison-range [comparison-type options]
               (u.date/comparison-range (t/local-date "2019-11-18") :month comparison-type (merge {:resolution :day} options)))]
@@ -379,7 +463,23 @@
           (is (= {:start (t/local-date-time "2019-11-17T23:59")}
                  (comparison-range :>= {:start :exclusive}))))))))
 
-(deftest period-duration-test
+(deftest comparison-range-start-of-week-test
+  (testing "`comparison-range` for week should respect the `start-of-week` Setting (#14294)"
+    (doseq [[first-day-of-week expected] {"sunday"    {:start #t "2021-02-21", :end #t "2021-02-27"}
+                                          "monday"    {:start #t "2021-02-22", :end #t "2021-02-28"}
+                                          "tuesday"   {:start #t "2021-02-23", :end #t "2021-03-01"}
+                                          "wednesday" {:start #t "2021-02-17", :end #t "2021-02-23"}
+                                          "thursday"  {:start #t "2021-02-18", :end #t "2021-02-24"}
+                                          "friday"    {:start #t "2021-02-19", :end #t "2021-02-25"}
+                                          "saturday"  {:start #t "2021-02-20", :end #t "2021-02-26"}}]
+      (mt/with-temporary-setting-values [start-of-week first-day-of-week]
+        (let [t #t "2021-02-23"]
+          (is (= expected
+                 (merge
+                  (u.date/comparison-range t :week :>= {:resolution :day})
+                  (u.date/comparison-range t :week :<= {:resolution :day, :end :inclusive})))))))))
+
+(deftest ^:parallel period-duration-test
   (testing "Creating a period duration from a string"
     (is (= (org.threeten.extra.PeriodDuration/of (t/duration "PT59S"))
            (u.date/period-duration "PT59S"))))
@@ -390,15 +490,15 @@
     (is (= (u.date/period-duration "PT59S")
            (u.date/period-duration (t/instant "2019-12-03T02:30:27Z") (t/offset-date-time "2019-12-03T02:31:26Z"))))))
 
-(deftest older-than-test
+(deftest ^:parallel older-than-test
   (let [now (t/instant "2019-12-04T00:45:00Z")]
-    (t/with-clock (t/mock-clock now (t/zone-id "America/Los_Angeles"))
+    (mt/with-clock (t/mock-clock now (t/zone-id "America/Los_Angeles"))
       (testing (str "now = " now)
         (doseq [t ((juxt t/instant t/local-date t/local-date-time t/offset-date-time identity)
                    (t/zoned-date-time "2019-11-01T00:00-08:00[US/Pacific]"))]
           (testing (format "t = %s" (pr-str t))
-            (is (= true
-                   (u.date/older-than? t (t/weeks 2)))
+            (is (true?
+                 (u.date/older-than? t (t/weeks 2)))
                 (format "%s happened before 2019-11-19" (pr-str t)))
             (is (= false
                    (u.date/older-than? t (t/months 2)))
@@ -406,5 +506,112 @@
 
 (deftest static-instances-locale-test
   (testing "in the Turkish locale, :minute-of-hour can be found"
-    (mt/with-locale "tr"
+    (mt/with-locale! "tr"
       (is (some? (:minute-of-hour (u.date.common/static-instances ChronoField)))))))
+
+(deftest ^:parallel with-time-zone-same-instant-test
+  ;; `t` = original value
+  ;; `expected` = the same value when shifted to `zone`
+  (doseq [[t expected zone]
+          [[(t/zoned-date-time 2011 4 18 0 0 0 0 (t/zone-id "Asia/Tokyo"))
+            (t/zoned-date-time "2011-04-17T15:00:00Z[UTC]")
+            "UTC"]
+
+           [(t/zoned-date-time 2011 4 18 0 0 0 0 (t/zone-id "Asia/Tokyo"))
+            (t/zoned-date-time "2011-04-18T00:00:00+09:00[Asia/Tokyo]")
+            "Asia/Tokyo"]
+
+           [(t/zoned-date-time 2011 4 18 0 0 0 0 (t/zone-id "UTC"))
+            (t/zoned-date-time "2011-04-18T09:00:00+09:00[Asia/Tokyo]")
+            "Asia/Tokyo"]
+
+           [(t/zoned-date-time 2011 4 18 0 0 0 0 (t/zone-id "UTC"))
+            (t/zoned-date-time "2011-04-18T00:00:00Z[UTC]")
+            "UTC"]
+
+           [(t/offset-date-time 2011 4 18 0 0 0 0 (t/zone-offset 9))
+            (t/offset-date-time "2011-04-17T15:00:00Z")
+            "UTC"]
+
+           [(t/offset-date-time 2011 4 18 0 0 0 0 (t/zone-offset 9))
+            (t/offset-date-time "2011-04-18T00:00:00+09:00")
+            "Asia/Tokyo"]
+
+           [(t/offset-date-time 2011 4 18 0 0 0 0 (t/zone-offset 0))
+            (t/offset-date-time "2011-04-18T09:00:00+09:00")
+            "Asia/Tokyo"]
+
+           ;; instants should return arg as-is since they're always normalized to UTC
+           [(t/instant (t/offset-date-time 2011 4 18 0 0 0 0 (t/zone-offset 0)))
+            (t/instant "2011-04-18T00:00:00Z")
+            "UTC"]
+
+           [(t/instant (t/offset-date-time 2011 4 18 0 0 0 0 (t/zone-offset 0)))
+            (t/instant "2011-04-18T00:00:00Z")
+            "Asia/Tokyo"]
+
+           [(t/instant (t/offset-date-time 2011 4 18 0 0 0 0 (t/zone-offset 0)))
+            (t/instant "2011-04-18T00:00:00Z")
+            "UTC"]
+
+           [(t/local-date-time 2011 4 18 0 0 0 0)
+            (t/offset-date-time "2011-04-18T00:00:00+09:00")
+            "Asia/Tokyo"]
+
+           [(t/local-date-time 2011 4 18 0 0 0 0)
+            (t/offset-date-time "2011-04-18T00:00:00Z")
+            "UTC"]
+
+           [(t/local-date 2011 4 18)
+            (t/offset-date-time "2011-04-18T00:00:00+09:00")
+            "Asia/Tokyo"]
+
+           [(t/local-date 2011 4 18)
+            (t/offset-date-time "2011-04-18T00:00:00Z")
+            "UTC"]
+
+           [(t/offset-time 19 55 0 0 (t/zone-offset 9))
+            (t/offset-time "10:55:00Z")
+            "UTC"]
+
+           [(t/offset-time 19 55 0 0 (t/zone-offset 9))
+            (t/offset-time "19:55:00+09:00")
+            "Asia/Tokyo"]
+
+           [(t/offset-time 19 55 0 0 (t/zone-offset 0))
+            (t/offset-time "19:55:00Z")
+            "UTC"]
+
+           [(t/offset-time 19 55 0 0 (t/zone-offset 0))
+            (t/offset-time "04:55:00+09:00")
+            "Asia/Tokyo"]
+
+           [(t/local-time 19 55)
+            (t/offset-time "19:55:00Z")
+            "UTC"]
+
+           [(t/local-time 19 55)
+            (t/offset-time "19:55:00+09:00")
+            "Asia/Tokyo"]]]
+    ;; results should be completely independent of the system clock
+    (doseq [[clock-instant clock-zone] [["2019-07-01T00:00:00Z" "UTC"]
+                                        ["2019-01-01T00:00:00Z" "US/Pacific"]
+                                        ["2019-07-01T00:00:00Z" "US/Pacific"]
+                                        ["2019-07-01T13:14:15Z" "UTC"]
+                                        ["2019-07-01T13:14:15Z" "US/Pacific"]]]
+      (testing (format "system clock = %s; system timezone = %s" clock-instant clock-zone)
+        (mt/with-clock (t/mock-clock (t/instant clock-instant) clock-zone)
+          (testing (format "\nshift %s '%s' to timezone ID '%s'" (.getName (class t)) t zone)
+            (is (= expected
+                   (u.date/with-time-zone-same-instant t (t/zone-id zone)))))))))
+  (testing "can handle infinity dates (#12761)"
+    (is (u.date/with-time-zone-same-instant java.time.OffsetDateTime/MAX (t/zone-id "UTC")))
+    (is (u.date/with-time-zone-same-instant java.time.OffsetDateTime/MIN (t/zone-id "UTC")))))
+
+(deftest ^:parallel standard-offset-test
+  (testing "standard-offset works correctly, regardless of system clock timezone"
+    (doseq [clk [#t "2021-01-01T00:00-06:00[US/Central]"   ; one in CST
+                 #t "2021-07-01T00:00-05:00[US/Central]"]] ; one in CDT
+      (mt/with-clock clk
+        (is (= (t/zone-offset "-06:00") (u.date.common/standard-offset (t/zone-id "America/Chicago"))))
+        (is (= (t/zone-offset "Z") (u.date.common/standard-offset (t/zone-id "UTC"))))))))

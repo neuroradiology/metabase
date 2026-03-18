@@ -5,13 +5,13 @@
 
   Note that this is not the same thing as initializing *drivers* -- drivers are initialized lazily when first needed;
   this step on the other hand runs at launch time and sets up that lazy load logic."
-  (:require [clojure.tools.logging :as log]
-            [metabase.plugins
-             [dependencies :as deps]
-             [init-steps :as init-steps]
-             [lazy-loaded-driver :as lazy-loaded-driver]]
-            [metabase.util :as u]
-            [metabase.util.i18n :refer [trs]]))
+  (:require
+   [metabase.plugins.dependencies :as deps]
+   [metabase.plugins.init-steps :as init-steps]
+   [metabase.plugins.lazy-loaded-driver :as lazy-loaded-driver]
+   [metabase.util :as u]
+   [metabase.util.log :as log]
+   [metabase.util.malli :as mu]))
 
 (defonce ^:private initialized-plugin-names (atom #{}))
 
@@ -35,24 +35,25 @@
     ;; getting it again
     (let [plugins-ready-to-init (deps/update-unsatisfied-deps! (swap! initialized-plugin-names conj plugin-name))]
       (when (seq plugins-ready-to-init)
-        (log/debug (u/format-color 'yellow (trs "Dependencies satisfied; these plugins will now be loaded: {0}"
-                                                (mapv (comp :name :info) plugins-ready-to-init)))))
+        (log/debug (u/format-color 'yellow (format "Dependencies satisfied; these plugins will now be loaded: %s"
+                                                   (mapv (comp :name :info) plugins-ready-to-init)))))
       (doseq [plugin-info plugins-ready-to-init]
         (init! plugin-info)))
     :ok))
 
-(defn- initialized? [{plugin-name :name}]
+(defn- initialized? [{{plugin-name :name} :info}]
   (@initialized-plugin-names plugin-name))
 
-(defonce ^:private plugin-initialization-lock (Object.))
-
-(defn init-plugin-with-info!
-  "Initiaize plugin using parsed info from a plugin maifest. Returns truthy if plugin was successfully initialized;
+(mu/defn init-plugin-with-info!
+  "Initialize plugin using parsed info from a plugin manifest. Returns truthy if plugin was successfully initialized;
   falsey otherwise."
-  [info]
+  [info :- [:map
+            [:info [:map
+                    [:name    :string]
+                    [:version :string]]]]]
   (or
    (initialized? info)
-   (locking plugin-initialization-lock
+   (locking initialized-plugin-names
      (or
       (initialized? info)
       (init! info)))))

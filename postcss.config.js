@@ -1,32 +1,37 @@
-const webpackPostcssTools = require('webpack-postcss-tools');
-const _ = require('underscore');
-const glob = require('glob');
-
-var SRC_PATH = __dirname + '/frontend/src/metabase';
-// Build mapping of CSS variables
-const CSS_SRC = glob.sync(SRC_PATH + '/css/**/*.css');
-const CSS_MAPS = { vars: {}, media: {}, selector: {} };
-CSS_SRC.map(webpackPostcssTools.makeVarMap).forEach(function(map) {
-    for (let name in CSS_MAPS) _.extend(CSS_MAPS[name], map[name]);
-});
-
-// CSS Next:
-const CSSNEXT_CONFIG = {
-    features: {
-        // pass in the variables and custom media we scanned for before
-        customProperties: { variables: CSS_MAPS.vars },
-        customMedia: { extensions: CSS_MAPS.media }
-    },
-    import: {
-        path: ['resources/frontend_client/app/css']
-    },
-    compress: false
-};
+/* eslint-env node */
+/* eslint-disable import/no-commonjs */
 
 module.exports = {
-    plugins: {
-        'postcss-import': {},
-        'postcss-url': {},
-        'postcss-cssnext': CSSNEXT_CONFIG,
-    }
-}
+  plugins: [
+    // Import other CSS files
+    require("postcss-import")(),
+
+    // Rebase/inline URLs
+    require("postcss-url")(),
+
+    // import custom media queries and provide them globally available
+    require("@csstools/postcss-global-data")({
+      files: ["frontend/src/metabase/css/core/breakpoints.module.css"],
+    }),
+
+    // Modern CSS features & your custom-media definitions
+    require("postcss-preset-env")({
+      stage: 2,
+      features: {
+        "custom-media-queries": true,
+        "custom-properties": true,
+        "focus-visible-pseudo-class": false,
+        "has-pseudo-class": false,
+      },
+    }),
+
+    // Strip comments
+    require("postcss-discard-comments")(),
+
+    // Nesting support
+    require("postcss-nesting")(),
+
+    // Mantine preset
+    require("postcss-preset-mantine")(),
+  ],
+};

@@ -1,0 +1,8 @@
+{:paths
+ ["src" "resources"]
+
+ :deps
+ {net.snowflake/snowflake-jdbc-thin {:mvn/version "4.0.1"
+                                     :exclusions  [io.grpc/grpc-netty-shaded]}
+  ;; drop when snowflake update driver to the one without the vulnerabilities
+  io.grpc/grpc-netty-shaded         {:mvn/version "1.77.0"}}}

@@ -1,7 +1,5 @@
-import "core-js/stable";
-import "regenerator-runtime/runtime";
-import "number-to-locale-string";
-import "metabase/css/index.css";
+import "metabase/css/vendor.css";
+import "metabase/css/index.module.css";
 
 window.MetabaseBootstrap = {
   "enable-xrays": true,
@@ -17,8 +15,8 @@ window.MetabaseBootstrap = {
     "US/Pacific",
     "America/Costa_Rica",
   ],
-  "availabl-locales": [["en", "English"]],
-  // NOTE: update this when updating types.clj
+  "available-locales": [["en", "English"]],
+  // NOTE: update this when updating types.cljc
   types: {
     "type/DruidHyperUnique": ["type/*"],
     "type/Longitude": ["type/Coordinate"],
@@ -31,7 +29,6 @@ window.MetabaseBootstrap = {
     "type/Owner": ["type/User"],
     "type/TextLike": ["type/*"],
     "type/Discount": ["type/Currency"],
-    "type/UNIXTimestampSeconds": ["type/UNIXTimestamp"],
     "type/PostgresEnum": ["type/Text"],
     "type/Time": ["type/Temporal"],
     "type/Integer": ["type/Number"],
@@ -47,6 +44,9 @@ window.MetabaseBootstrap = {
     "type/State": ["type/Category", "type/Address", "type/Text"],
     "type/CancelationDate": ["type/Date", "type/CancelationTimestamp"],
     "type/CancelationTime": ["type/Date", "type/CancelationTimestamp"],
+    "type/UpdatedDate": ["type/Date", "type/UpdatedTimestamp"],
+    "type/UpdatedTime": ["type/Date", "type/UpdatedTimestamp"],
+    "type/UpdatedTimestamp": ["type/DateTime"],
     "type/DeletionDate": ["type/Date", "type/DeletionTimestamp"],
     "type/DateTimeWithZoneID": ["type/DateTimeWithTZ"],
     "type/Address": ["type/*"],
@@ -89,7 +89,6 @@ window.MetabaseBootstrap = {
     "type/Product": ["type/Category"],
     "type/ImageURL": ["type/URL"],
     "type/Price": ["type/Currency"],
-    "type/UNIXTimestampMilliseconds": ["type/UNIXTimestamp"],
     "type/Collection": ["type/*"],
     "type/User": ["type/*"],
     "type/Array": ["type/Collection"],
@@ -101,7 +100,6 @@ window.MetabaseBootstrap = {
     "type/ZipCode": ["type/Address", "type/Text"],
     "type/DateTime": ["type/Temporal"],
     "type/DateTimeWithLocalTZ": ["type/DateTimeWithTZ"],
-    "type/UNIXTimestamp": ["type/Integer", "type/Instant"],
     "type/Enum": ["type/Category", "type/*"],
   },
   version: {

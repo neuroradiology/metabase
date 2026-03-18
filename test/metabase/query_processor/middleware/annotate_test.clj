@@ -1,524 +1,399 @@
-(ns metabase.query-processor.middleware.annotate-test
-  (:require [clojure.test :refer :all]
-            [metabase
-             [driver :as driver]
-             [models :refer [Field]]
-             [test :as mt]
-             [util :as u]]
-            [metabase.query-processor.middleware.annotate :as annotate]
-            [metabase.query-processor.store :as qp.store]
-            [metabase.test.data :as data]
-            [toucan.db :as db]
-            [toucan.util.test :as tt]))
+(ns ^:mb/driver-tests metabase.query-processor.middleware.annotate-test
+  (:require
+   [clojure.test :refer :all]
+   [medley.core :as m]
+   [metabase.config.core :as config]
+   [metabase.driver :as driver]
+   [metabase.lib.core :as lib]
+   [metabase.lib.test-metadata :as meta]
+   [metabase.lib.test-util :as lib.tu]
+   [metabase.lib.test-util.macros :as lib.tu.macros]
+   [metabase.query-processor.middleware.annotate :as annotate]
+   [metabase.query-processor.preprocess :as qp.preprocess]
+   ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
+   [metabase.test :as mt]
+   [metabase.util :as u]
+   [metabase.util.malli :as mu]))
 
-(defn- add-column-info [query metadata]
-  (mt/with-everything-store
-    (driver/with-driver :h2
-      (-> (mt/test-qp-middleware annotate/add-column-info query metadata []) :metadata :data))))
+(set! *warn-on-reflection* true)
 
-;;; +----------------------------------------------------------------------------------------------------------------+
-;;; |                                             column-info (:native)                                              |
-;;; +----------------------------------------------------------------------------------------------------------------+
+(deftest ^:parallel needs-type-inference?-test
+  (is (#'annotate/needs-type-inference?
+       {:lib/type :mbql/query, :stages [{:lib/type :mbql.stage/native}]}
+       {:cols [{:name "_id"} {:name "longitude"} {:name "category_id"} {:name "price"} {:name "name"} {:name "latitude"}]})))
 
-(deftest native-column-info-test
+(mu/defn- add-column-info
+  ([query metadata]
+   (add-column-info query metadata []))
+
+  ([query    :- :map
+    metadata :- ::annotate/metadata
+    rows     :- [:maybe [:sequential [:sequential :any]]]]
+   (letfn [(rff [metadata]
+             (fn rf
+               ([]
+                {:data metadata})
+               ([results]
+                (:data results))
+               ([results row]
+                (update-in results [:data :rows] (fn [rows]
+                                                   (conj (or rows []) row))))))]
+     (driver/with-driver :h2
+       (let [rff' (annotate/add-column-info query rff)
+             rf   (rff' metadata)]
+         (transduce identity rf rows))))))
+
+(deftest ^:parallel native-column-info-test
   (testing "native column info"
     (testing "should still infer types even if the initial value(s) are `nil` (#4256, #6924)"
       (is (= [:type/Integer]
              (transduce identity (#'annotate/base-type-inferer {:cols [{}]})
-                        (concat (repeat 1000 [nil]) [[1] [2]])))))
+                        (concat (repeat 1000 [nil]) [[1] [2]])))))))
 
+(deftest ^:parallel native-column-info-test-2
+  (testing "native column info"
     (testing "should use default `base_type` of `type/*` if there are no non-nil values in the sample"
       (is (= [:type/*]
              (transduce identity (#'annotate/base-type-inferer {:cols [{}]})
-                        [[nil]]))))
+                        [[nil]]))))))
 
+(deftest ^:parallel native-column-info-test-3
+  (testing "native column info"
     (testing "should attempt to infer better base type if driver returns :type/* (#12150)"
       ;; `merged-column-info` handles merging info returned by driver & inferred by annotate
       (is (= [:type/Integer]
              (transduce identity (#'annotate/base-type-inferer {:cols [{:base_type :type/*}]})
-                        [[1] [2] [nil] [3]]))))
+                        [[1] [2] [nil] [3]]))))))
 
+(defn- column-info [query {:keys [rows], :as metadata}]
+  (let [metadata (cond-> metadata
+                   (and (seq (:columns metadata))
+                        (empty? (:cols metadata)))
+                   (assoc :cols []))]
+    (-> (add-column-info query (dissoc metadata :rows) rows)
+        :cols)))
+
+(deftest ^:parallel native-column-info-test-4
+  (testing "native column info"
     (testing "should disambiguate duplicate names"
-      (is (= [{:name "a", :display_name "a", :base_type :type/Integer, :source :native, :field_ref [:field-literal "a" :type/Integer]}
-              {:name "a", :display_name "a", :base_type :type/Integer, :source :native, :field_ref [:field-literal "a_2" :type/Integer]}]
-             (annotate/column-info
-              {:type :native}
-              {:cols [{:name "a" :base_type :type/Integer} {:name "a" :base_type :type/Integer}]
-               :rows [[1 nil]]}))))))
+      (doseq [rows [[]
+                    [[1 nil]]]
+              query [{:type :native, :native {:query "SELECT *"}}
+                     {:type :query, :query {:source-query {:native "SELECT *"}}}]
+              initial-base-type [:type/Integer
+                                 :type/*]
+              :let [expected-base-type-col-1 (if (or (= rows [[1 nil]])
+                                                     (= initial-base-type :type/Integer))
+                                               :type/Integer
+                                               :type/*)
+                    expected-base-type-col-2 (if (= initial-base-type :type/Integer)
+                                               :type/Integer
+                                               :type/*)]]
+        ;; should work with and without rows
+        (testing (format "\nrows = %s, query = %s, initial-base-type = %s" (pr-str rows) (pr-str query) initial-base-type)
+          (is (=? [{:name           "a"
+                    :display_name   "a"
+                    :base_type      expected-base-type-col-1
+                    :effective_type expected-base-type-col-1
+                    :source         :native
+                    :field_ref      [:field "a" {:base-type expected-base-type-col-1}]}
+                   {:name           "a_2"
+                    :display_name   "a"
+                    :base_type      expected-base-type-col-2
+                    :effective_type expected-base-type-col-2
+                    :source         :native
+                    :field_ref      [:field "a_2" {:base-type expected-base-type-col-2}]}]
+                  (column-info
+                   (lib/query meta/metadata-provider query)
+                   {:cols [{:name "a" :base_type initial-base-type}
+                           {:name "a" :base_type initial-base-type}]
+                    :rows rows}))))))))
 
+(deftest ^:parallel native-column-type-inference-test
+  (testing "native column info should be able to infer types from rows if not provided by driver initial metadata"
+    (doseq [[expected-base-type rows] {:type/*       []
+                                       :type/Integer [[1 nil]]}]
+      ;; should work with and without rows
+      (testing (format "\nrows = %s" (pr-str rows))
+        (is (=? [{:name         "a"
+                  :display_name "a"
+                  :base_type    expected-base-type
+                  :source       :native
+                  :field_ref    [:field "a" {:base-type expected-base-type}]}
+                 {:name         "a_2"
+                  :display_name "a"
+                  :base_type    :type/*
+                  :source       :native
+                  :field_ref    [:field "a_2" {:base-type :type/*}]}]
+                (column-info
+                 (lib/query meta/metadata-provider {:type :native, :native {:query "SELECT 1;"}})
+                 {:cols [{:name "a"} {:name "a"}]
+                  :rows rows})))))))
 
-;;; +----------------------------------------------------------------------------------------------------------------+
-;;; |                                       (MBQL) Col info for Field clauses                                        |
-;;; +----------------------------------------------------------------------------------------------------------------+
+(deftest ^:parallel mbql-cols-nested-queries-test
+  (testing "Should be able to infer MBQL columns with nested queries"
+    (qp.store/with-metadata-provider meta/metadata-provider
+      (let [base-query (-> (lib.tu.macros/mbql-query venues
+                             {:joins [{:fields       :all
+                                       :source-table $$categories
+                                       :condition    [:= $category-id &c.categories.id]
+                                       :alias        "c"}]})
+                           qp.preprocess/preprocess)]
+        (doseq [level [0 1 2 3]
+                :let [field (fn [field-key legacy-ref]
+                              (let [metadata (meta/field-metadata :venues field-key)]
+                                (-> metadata
+                                    (select-keys [:id :name])
+                                    (assoc :field_ref legacy-ref))))]]
+          (testing (format "%d level(s) of nesting" level)
+            (let [nested-query (nth (iterate lib/append-stage base-query) level)]
+              (is (=? (lib.tu.macros/$ids venues
+                        [(field :id          $id)
+                         (field :name        $name)
+                         (field :category-id $category-id)
+                         (field :latitude    $latitude)
+                         (field :longitude   $longitude)
+                         (field :price       $price)
+                         {:name      "ID_2"
+                          :id        %categories.id
+                          :field_ref &c.categories.id}
+                         {:name      "NAME_2"
+                          :id        %categories.name
+                          :field_ref &c.categories.name}])
+                      (map #(select-keys % [:name :id :field_ref])
+                           (:cols (add-column-info nested-query {:cols []}))))))))))))
 
-(defn- info-for-field
-  ([field-id]
-   (db/select-one (into [Field] (disj (set @#'qp.store/field-columns-to-fetch) :database_type)) :id field-id))
+(deftest ^:parallel mbql-cols-nested-queries-test-2
+  (testing "Aggregated question with source is an aggregated models should infer display_name correctly (#23248)"
+    (qp.store/with-metadata-provider (lib.tu/metadata-provider-with-cards-for-queries
+                                      meta/metadata-provider
+                                      [(lib.tu.macros/mbql-query products
+                                         {:aggregation
+                                          [[:aggregation-options
+                                            [:sum $price]
+                                            {:name "sum"}]
+                                           [:aggregation-options
+                                            [:max $rating]
+                                            {:name "max"}]]
+                                          :breakout     [$category]
+                                          :order-by     [[:asc $category]]})])
+      (let [query (qp.preprocess/preprocess
+                   (lib/query
+                    (qp.store/metadata-provider)
+                    (lib.tu.macros/mbql-query nil
+                      {:source-table "card__1"
+                       :aggregation  [[:aggregation-options
+                                       [:sum
+                                        [:field
+                                         "sum"
+                                         {:base-type :type/Float}]]
+                                       {:name "sum"}]
+                                      [:aggregation-options
+                                       [:count]
+                                       {:name "count"}]]
+                       :limit        1})))]
+        (is (= ["Sum of Sum of Price" "Count"]
+               (->> (add-column-info query {:cols [{} {}]})
+                    :cols
+                    (map :display_name))))))))
 
-  ([table-key field-key]
-   (info-for-field (mt/id table-key field-key))))
+(deftest ^:parallel inception-test
+  (testing "Should return correct metadata for an 'inception-style' nesting of source > source > source with a join (#14745)"
+    ;; these tests look at the metadata for just one column so it's easier to spot the differences.
+    (letfn [(ean-metadata [result]
+              (as-> (:cols result) result
+                (m/index-by :name result)
+                (get result "EAN")
+                (select-keys result [:name :display_name :base_type :semantic_type :id :field_ref])))]
+      (qp.store/with-metadata-provider meta/metadata-provider
+        (testing "Make sure metadata is correct for the 'EAN' column with"
+          (let [base-query (qp.preprocess/preprocess
+                            (lib/query
+                             meta/metadata-provider
+                             (lib.tu.macros/mbql-query orders
+                               {:joins [{:fields       :all
+                                         :source-table $$products
+                                         :condition    [:= $product-id &Products.products.id]
+                                         :alias        "Products"}]
+                                :limit 10})))]
+            (doseq [level (range 4)]
+              (testing (format "%d level(s) of nesting" level)
+                (let [nested-query (nth (iterate lib/append-stage base-query) level)]
+                  (testing (format "\nQuery = %s" (u/pprint-to-str nested-query))
+                    (is (= (lib.tu.macros/$ids products
+                             {:name          "EAN"
+                              :display_name  "Products → Ean"
+                              :base_type     :type/Text
+                              :id            %ean
+                              :field_ref     &Products.ean})
+                           (ean-metadata (add-column-info nested-query {:cols []}))))))))))))))
 
-(deftest col-info-field-ids-test
-  (testing "make sure columns are comming back the way we'd expect for :field-literal clauses"
-    (mt/with-everything-store
-      (mt/$ids venues
-        (is (= [(merge (info-for-field :venues :price)
-                       {:source    :fields
-                        :field_ref $price})]
-               (doall
-                (annotate/column-info
-                 {:type :query, :query {:fields [$price]}}
-                 {:columns [:price]}))))))))
+(deftest ^:parallel col-info-for-fields-from-card-test
+  (testing "#14787"
+    (let [card-1-query (lib.tu.macros/mbql-query orders
+                         {:joins [{:fields       :all
+                                   :source-table $$products
+                                   :condition    [:= $product-id &Products.products.id]
+                                   :alias        "Products"}]})
+          mp (lib.tu/metadata-provider-with-cards-for-queries
+              meta/metadata-provider
+              [card-1-query
+               (lib.tu.macros/mbql-query people)])]
+      (testing "when a nested query is from a saved question, there should be no `:join-alias` on the left side"
+        (lib.tu.macros/$ids nil
+          (let [base-query (qp.preprocess/preprocess
+                            (lib/query
+                             mp
+                             (lib.tu.macros/mbql-query nil
+                               {:source-table "card__1"
+                                :joins        [{:fields       :all
+                                                :source-table "card__2"
+                                                :condition    [:= $orders.user-id &Products.products.id]
+                                                :alias        "Q"}]
+                                :limit        1})))
+                fields     #{%orders.discount %products.title %people.source}]
+            (is (= [{:display_name "Discount"
+                     :field_ref    [:field %orders.discount nil]}
+                    {:display_name "Products → Title"
+                     :field_ref    [:field %products.title nil]}
+                    {:display_name "Q → Source"
+                     :field_ref    [:field %people.source {:join-alias "Q"}]}]
+                   (->> (:cols (add-column-info base-query {}))
+                        (filter #(fields (:id %)))
+                        (map #(select-keys % [:display_name :field_ref])))))))))))
 
-;; TODO - I think this can be removed, now that `fk->` forms are "sugar" and replaced with `:joined-field` clauses
-;; before the query ever makes it to the 'annotate' stage
-(deftest col-info-for-fks-and-joins-test
-  (mt/with-everything-store
-    (mt/$ids venues
-      (testing "when an `fk->` form is used, we should add in `:fk_field_id` info about the source Field"
-        (is (= [(merge (info-for-field :categories :name)
-                       {:fk_field_id %category_id
-                        :source      :fields
-                        :field_ref   $category_id->categories.name})]
-               (doall
-                (annotate/column-info
-                 {:type :query, :query {:fields [$category_id->categories.name]}}
-                 {:columns [:name]})))))
+(deftest ^:parallel col-info-for-joined-fields-from-card-test
+  (testing "Has the correct display names for joined fields from cards (#14787)"
+    (letfn [(native [query] {:type     :native
+                             :native   {:query query :template-tags {}}
+                             :database (meta/id)})]
+      (let [card1-eid (u/generate-nano-id)
+            card2-eid (u/generate-nano-id)]
+        (qp.store/with-metadata-provider (lib.tu/mock-metadata-provider
+                                          meta/metadata-provider
+                                          {:cards [{:id              1
+                                                    :entity_id       card1-eid
+                                                    :name            "Card 1"
+                                                    :database-id     (meta/id)
+                                                    :dataset-query   (native "select 'foo' as A_COLUMN")
+                                                    :result-metadata [{:name         "A_COLUMN"
+                                                                       :display_name "A Column"
+                                                                       :base_type    :type/Text}]}
+                                                   {:id              2
+                                                    :entity_id       card2-eid
+                                                    :name            "Card 2"
+                                                    :database-id     (meta/id)
+                                                    :dataset-query   (native "select 'foo' as B_COLUMN")
+                                                    :result-metadata [{:name         "B_COLUMN"
+                                                                       :display_name "B Column"
+                                                                       :base_type    :type/Text}]}]})
+          (let [query (lib.tu.macros/mbql-query nil
+                        {:source-table "card__1"
+                         :joins        [{:fields       "all"
+                                         :source-table "card__2"
+                                         :condition    [:=
+                                                        [:field "A_COLUMN" {:base-type :type/Text}]
+                                                        [:field "B_COLUMN" {:base-type  :type/Text
+                                                                            :join-alias "alias"}]]
+                                         :alias        "alias"}]})
+                cols  (qp.preprocess/query->expected-cols query)]
+            (is (=? [{}
+                     {:display_name "alias → B Column"}]
+                    cols)
+                "cols has wrong display name")))))))
 
-      (testing "joins"
-        (testing (str "we should get `:fk_field_id` and information where possible when using `:joined-field` clauses; "
-                      "display_name should include the display name of the FK field  (for IMPLICIT JOINS)")
-          (is (= [(merge (info-for-field :categories :name)
-                         {:display_name "Category → Name"
-                          :source       :fields
-                          :field_ref    $category_id->categories.name
-                          :fk_field_id  %category_id})]
-                 (doall
-                  (annotate/column-info
-                   {:type  :query
-                    :query {:fields [&CATEGORIES__via__CATEGORY_ID.categories.name]
-                            :joins  [{:alias        "CATEGORIES__via__CATEGORY_ID"
-                                      :source-table $$venues
-                                      :condition    [:= $category_id &CATEGORIES__via__CATEGORY_ID.categories.id]
-                                      :strategy     :left-join
-                                      :fk-field-id  %category_id}]}}
-                   {:columns [:name]})))))
+(deftest ^:parallel preserve-original-join-alias-e2e-test
+  (testing "The join alias for the `:field_ref` in results metadata should match the one originally specified (#27464)"
+    (mt/test-drivers (mt/normal-drivers-with-feature :left-join)
+      (let [join-alias "Products with a very long name - Product ID with a very long name"
+            results    (mt/run-mbql-query orders
+                         {:joins  [{:source-table $$products
+                                    :condition    [:= $product_id [:field %products.id {:join-alias join-alias}]]
+                                    :alias        join-alias
+                                    :fields       [[:field %products.title {:join-alias join-alias}]]}]
+                          :fields [$orders.id
+                                   [:field %products.title {:join-alias join-alias}]]
+                          :limit  4})]
+        (doseq [[location metadata] {"data.cols"                     (mt/cols results)
+                                     "data.results_metadata.columns" (get-in results [:data :results_metadata :columns])}]
+          (testing location
+            (is (=? (mt/$ids
+                      [{:display_name "ID"
+                        :field_ref    $orders.id}
+                       {:display_name (str join-alias " → Title")
+                        :field_ref    [:field %products.title {:join-alias join-alias}]}])
+                    (map
+                     #(select-keys % [:display_name :field_ref])
+                     metadata)))))))))
 
-        (testing (str "for EXPLICIT JOINS (which do not include an `:fk-field-id` in the Join info) the returned "
-                      "`:field_ref` should be a `joined-field` clause instead of an `fk->` clause")
-          (is (= [(merge (info-for-field :categories :name)
-                         {:display_name "Categories → Name"
-                          :source       :fields
-                          :field_ref    &Categories.categories.name})]
-                 (doall
-                  (annotate/column-info
-                   {:type  :query
-                    :query {:fields [&Categories.categories.name]
-                            :joins  [{:alias        "Categories"
-                                      :source-table $$venues
-                                      :condition    [:= $category_id &Categories.categories.id]
-                                      :strategy     :left-join}]}}
-                   {:columns [:name]})))))))))
+;;; adapted from [[metabase.driver.postgres-test/pgobject-test]], but does not actually run any queries.
+(deftest ^:parallel native-query-infer-effective-type-test
+  (testing "Inferred base-type should also get propagated to effective-type"
+    (let [query (lib/query
+                 meta/metadata-provider
+                 {:database (meta/id)
+                  :type     :native
+                  :native   {:query "SELECT pg_sleep(0.01) AS sleep;"}})]
+      (is (=? [{:display_name   "sleep"
+                :base_type      :type/Text
+                :effective_type :type/Text
+                :database_type  "void"
+                :source         :native
+                :field_ref      [:field "sleep" {:base-type :type/Text}]
+                :name           "sleep"}]
+              (-> (add-column-info
+                   query
+                   {:cols [{:name "sleep", :base_type :type/*, :database_type "void"}]}
+                   [[""]])
+                  :cols))))))
 
-(deftest col-info-for-datetime-field-test
-  (mt/with-everything-store
-    (mt/$ids venues
-      (testing "when a `:datetime-field` form is used, we should add in info about the `:unit`"
-        (is (= [(merge (info-for-field :venues :price)
-                       {:unit      :month
-                        :source    :fields
-                        :field_ref !month.price})]
-               (doall
-                (annotate/column-info
-                 {:type :query, :query {:fields (mt/$ids venues [!month.price])}}
-                 {:columns [:price]})))))
+(deftest ^:sequential expected-cols-no-infinite-loop-test
+  (testing "In case of a lib vs. driver column count mismatch, don't loop infinitely (#66955)"
+    (let [query       (lib/query meta/metadata-provider
+                                 (meta/table-metadata :orders))
+          all-cols    (mapv #(select-keys % [:name :base-type]) (lib/returned-columns query))
+          missing-one (butlast all-cols)]
+      (is (= 9 (count (annotate/expected-cols query all-cols))))
+      (testing "in dev and test modes, we throw an error when the counts differ"
+        (is (thrown-with-msg? Exception #"column number mismatch"
+                              (annotate/expected-cols query missing-one))))
+      (testing "in prod, we log and append nils to make the counts line up - this looped forever before #66955!"
+        (with-redefs [config/is-prod? true]
+          (is (= 8 (count (annotate/expected-cols query missing-one)))))))))
 
-      (testing "datetime unit should work on field literals too"
-        (is (= [{:name         "price"
-                 :base_type    :type/Number
-                 :display_name "Price"
-                 :unit         :month
-                 :source       :fields
-                 :field_ref    !month.*price/Number}]
-               (doall
-                (annotate/column-info
-                 {:type :query, :query {:fields [[:datetime-field [:field-literal "price" :type/Number] :month]]}}
-                 {:columns [:price]}))))))))
-
-(deftest col-info-for-binning-strategy-test
-  (testing "when binning-strategy is used, include `:binning_info`"
-    (is (= [{:name         "price"
-             :base_type    :type/Number
-             :display_name "Price"
-             :unit         :month
-             :source       :fields
-             :binning_info {:num_bins 10, :bin_width 5, :min_value -100, :max_value 100, :binning_strategy :num-bins}
-             :field_ref    [:binning-strategy
-                            [:datetime-field [:field-literal "price" :type/Number] :month]
-                            :num-bins 10
-                            {:num-bins 10, :bin-width 5, :min-value -100, :max-value 100}]}]
-           (doall
-            (annotate/column-info
-             {:type  :query
-              :query {:fields [[:binning-strategy
-                                [:datetime-field [:field-literal "price" :type/Number] :month]
-                                :num-bins 10
-                                {:num-bins 10, :bin-width 5, :min-value -100, :max-value 100}]]}}
-             {:columns [:price]}))))))
-
-(deftest col-info-combine-parent-field-names-test
-  (testing "For fields with parents we should return them with a combined name including parent's name"
-    (tt/with-temp* [Field [parent {:name "parent", :table_id (mt/id :venues)}]
-                    Field [child  {:name "child", :table_id (mt/id :venues), :parent_id (u/get-id parent)}]]
-      (mt/with-everything-store
-        (is (= {:description     nil
-                :table_id        (mt/id :venues)
-                :special_type    nil
-                :name            "parent.child"
-                :settings        nil
-                :field_ref       [:field-id (u/get-id child)]
-                :parent_id       (u/get-id parent)
-                :id              (u/get-id child)
-                :visibility_type :normal
-                :display_name    "Child"
-                :fingerprint     nil
-                :base_type       :type/Text}
-               (into {} (#'annotate/col-info-for-field-clause {} [:field-id (u/get-id child)])))))))
-
-  (testing "nested-nested fields should include grandparent name (etc)"
-    (tt/with-temp* [Field [grandparent {:name "grandparent", :table_id (mt/id :venues)}]
-                    Field [parent      {:name "parent", :table_id (mt/id :venues), :parent_id (u/get-id grandparent)}]
-                    Field [child       {:name "child", :table_id (mt/id :venues), :parent_id (u/get-id parent)}]]
-      (mt/with-everything-store
-        (is (= {:description     nil
-                :table_id        (mt/id :venues)
-                :special_type    nil
-                :name            "grandparent.parent.child"
-                :settings        nil
-                :field_ref       [:field-id (u/get-id child)]
-                :parent_id       (u/get-id parent)
-                :id              (u/get-id child)
-                :visibility_type :normal
-                :display_name    "Child"
-                :fingerprint     nil
-                :base_type       :type/Text}
-               (into {} (#'annotate/col-info-for-field-clause {} [:field-id (u/get-id child)]))))))))
-
-(deftest col-info-field-literals-test
-  (testing "field literals should get the information from the matching `:source-metadata` if it was supplied"
-    (mt/with-everything-store
-      (is (= {:name         "sum"
-              :display_name "sum of User ID"
-              :base_type    :type/Integer
-              :field_ref    [:field-literal "sum" :type/Integer]
-              :special_type :type/FK}
-             (#'annotate/col-info-for-field-clause
-              {:source-metadata
-               [{:name "abc", :display_name "another Field", :base_type :type/Integer, :special_type :type/FK}
-                {:name "sum", :display_name "sum of User ID", :base_type :type/Integer, :special_type :type/FK}]}
-              [:field-literal "sum" :type/Integer]))))))
-
-(deftest col-info-expressions-test
-  (mt/with-everything-store
-    (testing "col info for an `expression` should work as expected"
-      (is (= {:base_type       :type/Float
-              :special_type    :type/Number
-              :name            "double-price"
-              :display_name    "double-price"
-              :expression_name "double-price"
-              :field_ref       [:expression "double-price"]}
-             (mt/$ids venues
-               (#'annotate/col-info-for-field-clause
-                {:expressions {"double-price" [:* $price 2]}}
-                [:expression "double-price"])))))
-
-    (testing "if there is no matching expression it should give a meaningful error message"
-      (is (= {:message "No expression named double-price found. Found: (\"one-hundred\")"
-              :data    {:type :invalid-query, :clause [:expression "double-price"], :expressions {"one-hundred" 100}}}
-             (try
-               (mt/$ids venues
-                 (#'annotate/col-info-for-field-clause {:expressions {"one-hundred" 100}} [:expression "double-price"]))
-               (catch Throwable e {:message (.getMessage e), :data (ex-data e)})))))))
-
-
-;;; +----------------------------------------------------------------------------------------------------------------+
-;;; |                                    (MBQL) Col info for Aggregation clauses                                     |
-;;; +----------------------------------------------------------------------------------------------------------------+
-
-;; test that added information about aggregations looks the way we'd expect
-(defn- aggregation-names
-  ([ag-clause]
-   (aggregation-names {} ag-clause))
-
-  ([inner-query ag-clause]
-   (binding [driver/*driver* :h2]
-     (mt/with-everything-store
-       {:name         (annotate/aggregation-name ag-clause)
-        :display_name (annotate/aggregation-display-name inner-query ag-clause)}))))
-
-(deftest aggregation-names-test
-  (testing "basic aggregations"
-    (testing ":count"
-      (is (= {:name "count", :display_name "Count"}
-             (aggregation-names [:count]))))
-
-    (testing ":distinct"
-      (is (= {:name "count", :display_name "Distinct values of ID"}
-             (aggregation-names [:distinct [:field-id (mt/id :venues :id)]]))))
-
-    (testing ":sum"
-      (is (= {:name "sum", :display_name "Sum of ID"}
-             (aggregation-names [:sum [:field-id (mt/id :venues :id)]])))))
-
-  (testing "expressions"
-    (testing "simple expression"
-      (is (= {:name "expression", :display_name "Count + 1"}
-             (aggregation-names [:+ [:count] 1]))))
-
-    (testing "expression with nested expressions"
-      (is (= {:name "expression", :display_name "Min of ID + (2 * Average of Price)"}
-             (aggregation-names
-              [:+
-               [:min [:field-id (mt/id :venues :id)]]
-               [:* 2 [:avg [:field-id (mt/id :venues :price)]]]]))))
-
-    (testing "very complicated expression"
-      (is (= {:name "expression", :display_name "Min of ID + (2 * Average of Price * 3 * (Max of Category ID - 4))"}
-             (aggregation-names
-              [:+
-               [:min [:field-id (mt/id :venues :id)]]
-               [:*
-                2
-                [:avg [:field-id (mt/id :venues :price)]]
-                3
-                [:- [:max [:field-id (mt/id :venues :category_id)]] 4]]])))))
-
-  (testing "`aggregation-options`"
-    (testing "`:name` and `:display-name`"
-      (is (= {:name "generated_name", :display_name "User-specified Name"}
-             (aggregation-names
-              [:aggregation-options
-               [:+ [:min [:field-id (mt/id :venues :id)]] [:* 2 [:avg [:field-id (mt/id :venues :price)]]]]
-               {:name "generated_name", :display-name "User-specified Name"}]))))
-
-    (testing "`:name` only"
-      (is (= {:name "generated_name", :display_name "Min of ID + (2 * Average of Price)"}
-             (aggregation-names
-              [:aggregation-options
-               [:+ [:min [:field-id (mt/id :venues :id)]] [:* 2 [:avg [:field-id (mt/id :venues :price)]]]]
-               {:name "generated_name"}]))))
-
-    (testing "`:display-name` only"
-      (is (= {:name "expression", :display_name "User-specified Name"}
-             (aggregation-names
-              [:aggregation-options
-               [:+ [:min [:field-id (mt/id :venues :id)]] [:* 2 [:avg [:field-id (mt/id :venues :price)]]]]
-               {:display-name "User-specified Name"}]))))))
-
-(defn- col-info-for-aggregation-clause
-  ([clause]
-   (col-info-for-aggregation-clause {} clause))
-
-  ([inner-query clause]
-   (binding [driver/*driver* :h2]
-     (#'annotate/col-info-for-aggregation-clause inner-query clause))))
-
-(deftest col-info-for-aggregation-clause-test
-  (mt/with-everything-store
-    (testing "basic aggregation clauses"
-      (testing "`:count` (no field)"
-        (is (= {:base_type :type/Float, :special_type :type/Number, :name "expression", :display_name "Count / 2"}
-               (col-info-for-aggregation-clause [:/ [:count] 2]))))
-
-      (testing "`:sum`"
-        (is (= {:base_type :type/Float, :special_type :type/Number, :name "sum", :display_name "Sum of Price + 1"}
-               (mt/$ids venues
-                 (col-info-for-aggregation-clause [:sum [:+ $price 1]]))))))
-
-    (testing "`:aggregation-options`"
-      (testing "`:name` and `:display-name`"
-        (is (= {:base_type    :type/Integer
-                :special_type :type/Category
-                :settings     nil
-                :name         "sum_2"
-                :display_name "My custom name"}
-               (mt/$ids venues
-                 (col-info-for-aggregation-clause
-                  [:aggregation-options [:sum $price] {:name "sum_2", :display-name "My custom name"}])))))
-
-      (testing "`:name` only"
-        (is (= {:base_type    :type/Integer
-                :special_type :type/Category
-                :settings     nil
-                :name         "sum_2"
-                :display_name "Sum of Price"}
-               (mt/$ids venues
-                 (col-info-for-aggregation-clause [:aggregation-options [:sum $price] {:name "sum_2"}])))))
-
-      (testing "`:display-name` only"
-        (is (= {:base_type    :type/Integer
-                :special_type :type/Category
-                :settings     nil
-                :name         "sum"
-                :display_name "My Custom Name"}
-               (mt/$ids venues
-                 (col-info-for-aggregation-clause
-                  [:aggregation-options [:sum $price] {:display-name "My Custom Name"}]))))))
-
-    (testing (str "if a driver is kind enough to supply us with some information about the `:cols` that come back, we "
-                  "should include that information in the results. Their information should be preferred over ours")
-      (is (= {:cols [{:name         "metric"
-                      :display_name "Total Events"
-                      :base_type    :type/Text
-                      :source       :aggregation
-                      :field_ref    [:aggregation 0]}]}
-             (add-column-info
-              (mt/mbql-query venues {:aggregation [[:metric "ga:totalEvents"]]})
-              {:cols [{:name "totalEvents", :display_name "Total Events", :base_type :type/Text}]}))))
-
-    (testing "col info for an `expression` aggregation w/ a named expression should work as expected"
-      (is (= {:base_type :type/Float, :special_type :type/Number, :name "sum", :display_name "Sum of double-price"}
-             (mt/$ids venues
-               (col-info-for-aggregation-clause {:expressions {"double-price" [:* $price 2]}} [:sum [:expression "double-price"]])))))))
-
-
-;;; +----------------------------------------------------------------------------------------------------------------+
-;;; |                                           Other MBQL col info tests                                            |
-;;; +----------------------------------------------------------------------------------------------------------------+
-
-(defn- infered-col-type
-  [expr]
-  (-> (add-column-info (mt/mbql-query venues {:expressions {"expr" expr}
-                                              :fields      [[:expression "expr"]]
-                                              :limit       10})
-                                      {})
-      :cols
-      first
-      (select-keys [:base_type :special_type])))
-
-(deftest test-string-extracts
-  (is (= {:base_type    :type/Text
-          :special_type nil}
-         (infered-col-type  [:trim "foo"])))
-  (is (= {:base_type    :type/Text
-          :special_type nil}
-         (infered-col-type  [:ltrim "foo"])))
-  (is (= {:base_type    :type/Text
-          :special_type nil}
-         (infered-col-type  [:rtrim "foo"])))
-  (is (= {:base_type    :type/BigInteger
-          :special_type :type/Number}
-         (infered-col-type  [:length "foo"])))
-  (is (= {:base_type    :type/Text
-          :special_type nil}
-         (infered-col-type  [:upper "foo"])))
-  (is (= {:base_type    :type/Text
-          :special_type nil}
-         (infered-col-type  [:lower "foo"])))
-  (is (= {:base_type    :type/Text
-          :special_type nil}
-         (infered-col-type  [:substring "foo" 2])))
-  (is (= {:base_type    :type/Text
-          :special_type nil}
-         (infered-col-type  [:replace "foo" "f" "b"])))
-  (is (= {:base_type    :type/Text
-          :special_type nil}
-         (infered-col-type  [:regex-match-first "foo" "f"])))
-  (is (= {:base_type    :type/Text
-          :special_type nil}
-         (infered-col-type  [:concat "foo" "bar"])))
-  (is (= {:base_type    :type/Text
-          :special_type nil}
-         (infered-col-type  [:coalesce "foo" "bar"])))
-  (is (= {:base_type    :type/Text
-          :special_type :type/Name}
-         (infered-col-type  [:coalesce [:field-id (data/id :venues :name)] "bar"]))))
-
-(deftest test-case
-  (is (= {:base_type    :type/Text
-          :special_type nil}
-         (infered-col-type [:case [[[:> (data/id :venues :price) 2] "big"]]])))
-  (is (= {:base_type    :type/Float
-          :special_type :type/Number}
-         (infered-col-type [:case [[[:> (data/id :venues :price) 2] [:+ (data/id :venues :price) 1]]]])))
-  (testing "Make sure we skip nils when infering case return type"
-    (is (= {:base_type    :type/Number
-            :special_type nil}
-           (infered-col-type [:case [[[:< (data/id :venues :price) 10] nil]
-                                     [[:> (data/id :venues :price) 2] 10]]]))))
-  (is (= {:base_type    :type/Float
-          :special_type :type/Number}
-         (infered-col-type [:case [[[:> (data/id :venues :price) 2] [:+ (data/id :venues :price) 1]]]]))))
-
-(deftest unique-name-key-test
-  (testing "Make sure `:cols` always come back with a unique `:name` key (#8759)"
-    (is (= {:cols
-            [{:base_type    :type/Number
-              :special_type :type/Number
-              :name         "count"
-              :display_name "count"
-              :source       :aggregation
-              :field_ref    [:aggregation 0]}
-             {:source       :aggregation
-              :name         "sum"
-              :display_name "sum"
-              :base_type    :type/Number
-              :field_ref    [:aggregation 1]}
-             {:base_type    :type/Number
-              :special_type :type/Number
-              :name         "count_2"
-              :display_name "count"
-              :source       :aggregation
-              :field_ref    [:aggregation 2]}
-             {:base_type    :type/Number
-              :special_type :type/Number
-              :name         "count_3"
-              :display_name "count_2"
-              :source       :aggregation
-              :field_ref    [:aggregation 3]}]}
-           (add-column-info
-            (mt/mbql-query venues
-              {:aggregation [[:count]
-                             [:sum]
-                             [:count]
-                             [:aggregation-options [:count] {:display-name "count_2"}]]})
-            {:cols [{:name "count", :display_name "count", :base_type :type/Number}
-                    {:name "sum", :display_name "sum", :base_type :type/Number}
-                    {:name "count", :display_name "count", :base_type :type/Number}
-                    {:name "count_2", :display_name "count_2", :base_type :type/Number}]})))))
-
-(deftest expressions-keys-test
-  (testing "make sure expressions come back with the right set of keys, including `:expression_name` (#8854)"
-    (is (= {:name            "discount_price",
-            :display_name    "discount_price",
-            :base_type       :type/Float,
-            :special_type    :type/Number,
-            :expression_name "discount_price",
-            :source          :fields,
-            :field_ref       [:expression "discount_price"]}
-           (-> (add-column-info
-                (mt/mbql-query venues
-                  {:expressions {"discount_price" [:* 0.9 $price]}
-                   :fields      [$name [:expression "discount_price"]]
-                   :limit       10})
-                {})
-               :cols
-               second)))))
-
-(deftest deduplicate-expression-names-test
-  (testing "make sure multiple expressions come back with deduplicated names"
-    (testing "expressions in aggregations"
-      (is (= [{:base_type :type/Float, :special_type :type/Number, :name "expression", :display_name "0.9 * Average of Price", :source :aggregation, :field_ref [:aggregation 0]}
-              {:base_type :type/Float, :special_type :type/Number, :name "expression_2", :display_name "0.8 * Average of Price", :source :aggregation, :field_ref [:aggregation 1]}]
-             (:cols (add-column-info
-                     (mt/mbql-query venues
-                                      {:aggregation [[:* 0.9 [:avg $price]] [:* 0.8 [:avg $price]]]
-                                       :limit       10})
-                     {})))))
-    (testing "named :expressions"
-      (is (= [{:name "prev_month", :display_name "prev_month", :base_type :type/DateTime, :special_type nil, :expression_name "prev_month", :source :fields, :field_ref [:expression "prev_month"]}]
-             (:cols (add-column-info
-                     (mt/mbql-query users
-                                      {:expressions {:prev_month [:+ $last_login [:interval -1 :month]]}
-                                       :fields      [[:expression "prev_month"]], :limit 10})
-                     {})))))))
+(deftest ^:parallel nested-field-display-name-test
+  (testing "expected-cols should produce correct nested display_names for fields with parent_id"
+    (let [grandparent-id (+ (meta/id :venues :id) 50)
+          parent-id      (+ (meta/id :venues :id) 60)
+          child-id       (+ (meta/id :venues :id) 70)
+          mp             (lib.tu/mock-metadata-provider
+                          {:database meta/database
+                           :tables   [(meta/table-metadata :venues)]
+                           :fields   (mapv (fn [field-metadata]
+                                             (merge {:visibility-type :normal
+                                                     :table-id        (meta/id :venues)}
+                                                    field-metadata))
+                                           [{:lib/type     :metadata/column
+                                             :name         "grandparent"
+                                             :display-name "Grandparent"
+                                             :id           grandparent-id
+                                             :base-type    :type/Text}
+                                            {:lib/type     :metadata/column
+                                             :name         "parent"
+                                             :display-name "Parent"
+                                             :parent-id    grandparent-id
+                                             :id           parent-id
+                                             :base-type    :type/Text}
+                                            {:lib/type     :metadata/column
+                                             :name         "child"
+                                             :display-name "Child"
+                                             :parent-id    parent-id
+                                             :id           child-id
+                                             :base-type    :type/Text}])})
+          query          (lib/query mp (meta/table-metadata :venues))]
+      (qp.store/with-metadata-provider mp
+        (let [cols (annotate/expected-cols query)]
+          (is (= ["Grandparent: Parent: Child"
+                  "Grandparent"
+                  "Grandparent: Parent"]
+                 (mapv :display_name cols))))))))

@@ -1,22 +1,23 @@
-import requestsReducer from "metabase/redux/requests";
-import { combineReducers, applyMiddleware, createStore, compose } from "redux";
-import promise from "redux-promise";
+import { combineReducers, configureStore } from "@reduxjs/toolkit";
 
-import { thunkWithDispatchAction } from "metabase/store";
 import * as entities from "metabase/redux/entities";
+import requestsReducer from "metabase/redux/requests";
 
-export function getStore() {
+export function getStore(reducers = {}, initialState = {}, middleware = []) {
   const reducer = combineReducers({
     entities: entities.reducer,
     requests: (state, action) =>
       requestsReducer(entities.requestsReducer(state, action), action),
+    ...reducers,
   });
 
-  const initialState = {};
-
-  return createStore(
+  return configureStore({
     reducer,
-    initialState,
-    compose(applyMiddleware(thunkWithDispatchAction, promise)),
-  );
+    preloadedState: initialState,
+    middleware: (getDefaultMiddleware) =>
+      getDefaultMiddleware({
+        immutableCheck: false,
+        serializableCheck: false,
+      }).concat(middleware),
+  });
 }

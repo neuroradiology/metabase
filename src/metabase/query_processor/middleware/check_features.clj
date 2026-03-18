@@ -1,42 +1,48 @@
 (ns metabase.query-processor.middleware.check-features
-  (:require [metabase
-             [driver :as driver]
-             [util :as u]]
-            [metabase.mbql.util :as mbql.u]
-            [metabase.query-processor.error-type :as error-type]
-            [metabase.util.i18n :refer [tru]]))
+  (:require
+   [metabase.driver :as driver]
+   [metabase.driver.util :as driver.u]
+   [metabase.lib.core :as lib]
+   [metabase.lib.metadata :as lib.metadata]
+   [metabase.lib.schema :as lib.schema]
+   [metabase.lib.walk :as lib.walk]
+   [metabase.query-processor.error-type :as qp.error-type]
+   [metabase.util :as u]
+   [metabase.util.i18n :refer [tru]]
+   [metabase.util.malli :as mu]))
 
-;; `assert-driver-supports` doesn't run check when `*driver*` is unbound (e.g., when used in the REPL)
-;; Allows flexibility when composing queries for tests or interactive development
-(defn assert-driver-supports
-  "When `*driver*` is bound, assert that is supports keyword FEATURE."
-  [feature]
-  (when driver/*driver*
-    (when-not (driver/supports? driver/*driver* feature)
-      (throw (ex-info (tru "{0} is not supported by this driver." (name feature))
-               {:type error-type/unsupported-feature})))))
+(defn- assert-driver-supports
+  "Assert that the driver/database supports keyword `feature`."
+  [metadata-providerable feature]
+  (let [database (lib.metadata/database metadata-providerable)]
+    (when-not (driver.u/supports? driver/*driver* feature database)
+      (throw (ex-info (tru "{0} is not supported by {1} driver." (name feature) (name driver/*driver*))
+                      {:type    qp.error-type/unsupported-feature
+                       :feature feature
+                       :driver  driver/*driver*})))))
 
 ;; TODO - definitely a little incomplete. It would be cool if we cool look at the metadata in the schema namespace and
 ;; auto-generate this logic
-(defn- query->required-features [query]
-  (mbql.u/match (:query query)
-    :stddev
-    :standard-deviation-aggregations
-
-    ;; `:fk->` is normally replaced by `:joined-field` already but the middleware that does the replacement won't run
-    ;; if the driver doesn't support foreign keys, meaning the clauses can leak thru
-    #{:joined-field :fk->}
-    :foreign-keys))
-
-(defn- check-features* [{query-type :type, :as query}]
-  (if-not (= query-type :query)
-    query
-    (u/prog1 query
-      (doseq [required-feature (query->required-features query)]
-        (assert-driver-supports required-feature)))))
+(mu/defn- query->required-features
+  [query :- ::lib.schema/query]
+  (let [required-features (volatile! (transient #{}))]
+    (lib.walk/walk-clauses
+     query
+     (fn [_query _path-type _stage-or-join-path clause]
+       (when (lib/clause-of-type? clause :stddev)
+         (vswap! required-features conj! :standard-deviation-aggregations))
+       nil))
+    (lib.walk/walk
+     query
+     (fn [_query path-type _path join]
+       (when (= path-type :lib.walk/join)
+         (vswap! required-features conj! (:strategy join)))
+       nil))
+    (persistent! @required-features)))
 
 (defn check-features
   "Middleware that checks that drivers support the `:features` required to use certain clauses, like `:stddev`."
-  [qp]
-  (fn [query rff context]
-    (qp (check-features* query) rff context)))
+  [query]
+  (u/prog1 query
+    (doseq [required-feature (query->required-features query)]
+      (assert-driver-supports query required-feature))))

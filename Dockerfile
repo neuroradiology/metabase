@@ -2,80 +2,63 @@
 # STAGE 1: builder
 ###################
 
-# Build currently doesn't work on > Java 11 (i18n utils are busted) so build on 8 until we fix this
-FROM adoptopenjdk/openjdk8:alpine as builder
+FROM node:22-bullseye AS builder
 
-WORKDIR /app/source
+ARG MB_EDITION=oss
+ARG VERSION
 
-ENV FC_LANG en-US
-ENV LC_CTYPE en_US.UTF-8
+WORKDIR /home/node
 
-# bash:    various shell scripts
-# wget:    installing lein
-# git:     ./bin/version
-# yarn:  frontend building
-# make:    backend building
-# gettext: translations
-# java-cacerts: installs updated cacerts to /etc/ssl/certs/java/cacerts
+RUN apt-get update && apt-get upgrade -y && apt-get install wget apt-transport-https gpg curl git -y \
+    && wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor | tee /etc/apt/trusted.gpg.d/adoptium.gpg > /dev/null \
+    && echo "deb https://packages.adoptium.net/artifactory/deb $(awk -F= '/^VERSION_CODENAME/{print$2}' /etc/os-release) main" | tee /etc/apt/sources.list.d/adoptium.list \
+    && apt-get update \
+    && apt install temurin-21-jdk -y \
+    && curl -O https://download.clojure.org/install/linux-install-1.12.0.1488.sh \
+    && chmod +x linux-install-1.12.0.1488.sh \
+    && ./linux-install-1.12.0.1488.sh
 
-RUN apk add --update coreutils bash yarn git wget make gettext java-cacerts
+COPY . .
 
-# lein:    backend dependencies and building
-ADD https://raw.github.com/technomancy/leiningen/stable/bin/lein /usr/local/bin/lein
-RUN chmod 744 /usr/local/bin/lein
-RUN lein upgrade
+# version is pulled from git, but git doesn't trust the directory due to different owners
+RUN git config --global --add safe.directory /home/node
 
-# install dependencies before adding the rest of the source to maximize caching
+# install bun for frontend dependencies
+RUN npm install -g bun
 
-# backend dependencies
-ADD project.clj .
-RUN lein deps
+# install frontend dependencies
+RUN bun install --frozen-lockfile
 
-# frontend dependencies
-ADD yarn.lock package.json .yarnrc ./
-RUN yarn
-
-# add the rest of the source
-ADD . .
-
-# build the app
-RUN bin/build
-
-# import AWS RDS cert into /etc/ssl/certs/java/cacerts
-ADD https://s3.amazonaws.com/rds-downloads/rds-combined-ca-bundle.pem .
-RUN keytool -noprompt -import -trustcacerts -alias aws-rds \
-  -file rds-combined-ca-bundle.pem \
-  -keystore /etc/ssl/certs/java/cacerts \
-  -keypass changeit -storepass changeit
+RUN INTERACTIVE=false CI=true MB_EDITION=$MB_EDITION bin/build.sh :version ${VERSION}
 
 # ###################
 # # STAGE 2: runner
 # ###################
 
-FROM adoptopenjdk/openjdk11:alpine-jre as runner
+## Remember that this runner image needs to be the same as bin/docker/Dockerfile with the exception that this one grabs the
+## jar from the previous stage rather than the local build
 
-WORKDIR /app
+FROM eclipse-temurin:21-jre-alpine AS runner
 
-ENV FC_LANG en-US
-ENV LC_CTYPE en_US.UTF-8
+ENV FC_LANG=en-US LC_CTYPE=en_US.UTF-8
 
 # dependencies
-RUN apk add --update bash ttf-dejavu fontconfig
-
-# add fixed cacerts
-COPY --from=builder /etc/ssl/certs/java/cacerts /opt/java/openjdk/lib/security/cacerts
+RUN apk add -U bash fontconfig curl font-noto font-noto-arabic font-noto-hebrew font-noto-cjk java-cacerts && \
+    apk upgrade && \
+    rm -rf /var/cache/apk/* && \
+    mkdir -p /app/certs && \
+    curl https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -o /app/certs/rds-combined-ca-bundle.pem  && \
+    /opt/java/openjdk/bin/keytool -noprompt -import -trustcacerts -alias aws-rds -file /app/certs/rds-combined-ca-bundle.pem -keystore /etc/ssl/certs/java/cacerts -keypass changeit -storepass changeit && \
+    curl https://cacerts.digicert.com/DigiCertGlobalRootG2.crt.pem -o /app/certs/DigiCertGlobalRootG2.crt.pem  && \
+    /opt/java/openjdk/bin/keytool -noprompt -import -trustcacerts -alias azure-cert -file /app/certs/DigiCertGlobalRootG2.crt.pem -keystore /etc/ssl/certs/java/cacerts -keypass changeit -storepass changeit && \
+    mkdir -p /plugins && chmod a+rwx /plugins
 
 # add Metabase script and uberjar
-RUN mkdir -p bin target/uberjar
-COPY --from=builder /app/source/target/uberjar/metabase.jar /app/target/uberjar/
-COPY --from=builder /app/source/bin/start /app/bin/
-
-# create the plugins directory, with writable permissions
-RUN mkdir -p /plugins
-RUN chmod a+rwx /plugins
+COPY --from=builder /home/node/target/uberjar/metabase.jar /app/
+COPY bin/docker/run_metabase.sh /app/
 
 # expose our default runtime port
 EXPOSE 3000
 
 # run it
-ENTRYPOINT ["/app/bin/start"]
+ENTRYPOINT ["/app/run_metabase.sh"]

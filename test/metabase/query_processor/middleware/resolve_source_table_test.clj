@@ -1,115 +1,128 @@
 (ns metabase.query-processor.middleware.resolve-source-table-test
-  (:require [expectations :refer [expect]]
-            [metabase.models
-             [database :refer [Database]]
-             [table :refer [Table]]]
-            [metabase.query-processor
-             [store :as qp.store]
-             [test-util :as qp.test-util]]
-            [metabase.query-processor.middleware.resolve-source-table :as resolve-source-table]
-            [metabase.test :as mt]
-            [metabase.test.data :as data]
-            [toucan.util.test :as tt]))
+  (:require
+   [clojure.test :refer :all]
+   [metabase.lib.core :as lib]
+   [metabase.lib.metadata.cached-provider :as lib.metadata.cached-provider]
+   [metabase.lib.metadata.protocols :as lib.metadata.protocols]
+   [metabase.lib.test-metadata :as meta]
+   [metabase.lib.test-util :as lib.tu]
+   [metabase.lib.test-util.macros :as lib.tu.macros]
+   [metabase.query-processor.middleware.resolve-source-table :as qp.resolve-source-table]))
 
-(defn- resolve-source-tables [query]
-  (:pre (mt/test-qp-middleware resolve-source-table/resolve-source-tables query)))
+(defn- cached-metadata
+  "Fetch the names of all the objects currently in the QP Store."
+  [metadata-provider]
+  (let [tables [:venues :categories :users :checkins]]
+    {:tables (into #{}
+                   (keep (fn [table]
+                           (:name (lib.metadata.protocols/cached-metadata metadata-provider :metadata/table (meta/id table)))))
+                   tables)}))
 
-(defn- do-with-store-contents [f]
-  ;; force creation of test data DB so things don't get left in the cache before running tests below
-  (data/id)
-  (qp.store/with-store
-    (qp.store/fetch-and-store-database! (data/id))
-    (f)
-    (qp.test-util/store-contents)))
+(defn- resolve-and-return-cached-metadata
+  ([query]
+   (resolve-and-return-cached-metadata (lib.metadata.cached-provider/cached-metadata-provider meta/metadata-provider) query))
 
-(defmacro ^:private with-store-contents {:style/indent 0} [& body]
-  `(do-with-store-contents (fn [] ~@body)))
+  ([metadata-provider query]
+   (let [query (lib/query metadata-provider query)]
+     (qp.resolve-source-table/resolve-source-tables query)
+     (cached-metadata metadata-provider))))
 
-;; does `resolve-source-tables` resolve source tables?
-(expect
-  {:database "test-data", :tables #{"VENUES"}, :fields #{}}
-  (with-store-contents
-    (resolve-source-tables (data/mbql-query venues))))
+(deftest ^:parallel basic-test
+  (testing "does `resolve-source-tables` resolve source tables?"
+    (is (= {:tables #{"VENUES"}}
+           (resolve-and-return-cached-metadata (lib.tu.macros/mbql-query venues))))))
 
-;; If the Table does not belong to the current Database, does it throw an Exception?
-(expect
-  Exception
-  (with-store-contents
-    (tt/with-temp* [Database [{database-id :id}]
-                    Table    [{table-id :id}    {:db_id database-id}]]
-      (resolve-source-tables {:database (data/id)
-                              :type     :query
-                              :query     {:source-table table-id}}))))
+(deftest ^:parallel validate-database-test
+  (testing "If the Table does not belong to the current Database, does it throw an Exception?"
+    (let [mp (lib.metadata.cached-provider/cached-metadata-provider
+              (lib.tu/mock-metadata-provider
+               {:database (merge meta/database
+                                 {:id 1})
+                :tables   [(merge (meta/table-metadata :venues)
+                                  {:id    1
+                                   :db-id 1})]}))]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"Failed to fetch :metadata/table \d+: either it does not exist, or it belongs to a different Database"
+           (resolve-and-return-cached-metadata
+            mp
+            {:database (meta/id)
+             :type     :query
+             :query    {:source-table 2}}))))))
 
-;; Should throw an Exception if there's a `:source-table` in the query that IS NOT a positive int
-(expect
-  Exception
-  (resolve-source-tables
-   {:database (data/id)
-    :type     :query
-    :query    {:source-table "ABC"}}))
+(deftest ^:parallel validate-source-table-test
+  (testing "Should throw an Exception if there's a `:source-table` in the query that IS NOT a positive int"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"Invalid output:.*should be a positive int, got: 0"
+         (resolve-and-return-cached-metadata
+          {:database (meta/id)
+           :type     :query
+           :query    {:source-table 0}})))))
 
-(expect
-  Exception
-  (resolve-source-tables
-   {:database (data/id)
-    :type     :query
-    :query    {:source-table 0}}))
+(deftest ^:parallel nested-queries-test
+  (testing "Does `resolve-source-tables` resolve source tables in nested source queries?"
+    (is (= {:tables #{"VENUES"}}
+           (resolve-and-return-cached-metadata
+            (lib.tu.macros/mbql-query nil
+              {:source-query {:source-table $$venues}}))))
 
-;; Does `resolve-source-tables` resolve source tables in nested source queries?
-(expect
-  {:database "test-data", :tables #{"VENUES"}, :fields #{}}
-  (with-store-contents
-    (resolve-source-tables
-     (data/mbql-query nil
-       {:source-query {:source-table $$venues}}))))
+    (is (= {:tables #{"VENUES"}}
+           (resolve-and-return-cached-metadata
+            (lib.tu.macros/mbql-query nil
+              {:source-query {:source-query {:source-table $$venues}}}))))))
 
-(expect
-  {:database "test-data", :tables #{"VENUES"}, :fields #{}}
-  (with-store-contents
-    (resolve-source-tables
-     (data/mbql-query nil
-       {:source-query {:source-query {:source-table $$venues}}}))))
+(deftest ^:parallel joins-test
+  (testing "Does `resolve-source-tables` resolve source tables in joins?"
+    (is (= {:tables #{"CATEGORIES" "VENUES"}}
+           (resolve-and-return-cached-metadata
+            (lib.tu.macros/mbql-query venues
+              {:joins [{:source-table $$categories
+                        :alias        "c"
+                        :condition    [:= $category-id &c.categories.id]}]}))))))
 
-;; Does `resolve-source-tables` resolve source tables in joins?
-(expect
-  {:database "test-data", :tables #{"CATEGORIES" "VENUES"}, :fields #{}}
-  (with-store-contents
-    (resolve-source-tables
-     (data/mbql-query venues
-       {:joins [{:source-table $$categories
-                 :alias        "c"
-                 :condition    [:= $category_id [:joined-field "c" $categories.id]]}]}))))
+(deftest ^:parallel joins-in-nested-queries-test
+  (testing "Does `resolve-source-tables` resolve source tables in joins inside nested source queries?"
+    (is (= {:tables #{"CATEGORIES" "VENUES"}}
+           (resolve-and-return-cached-metadata
+            (lib.tu.macros/mbql-query venues
+              {:source-query {:source-table $$venues
+                              :joins        [{:source-table $$categories
+                                              :alias        "c"
+                                              :condition    [:= $category-id &c.categories.id]}]}}))))))
 
-;; Does `resolve-source-tables` resolve source tables in joins inside nested source queries?
-(expect
-  {:database "test-data", :tables #{"CATEGORIES" "VENUES"}, :fields #{}}
-  (with-store-contents
-    (resolve-source-tables
-     (data/mbql-query venues
-       {:source-query {:source-table $$venues
-                       :joins        [{:source-table $$categories
-                                       :alias        "c"
-                                       :condition    [:= $category_id [:joined-field "c" $categories.id]]}]}}))))
+(deftest ^:parallel nested-queries-in-joins-test
+  (testing "Does `resolve-source-tables` resolve source tables inside nested source queries inside joins?"
+    (is (= {:tables #{"CATEGORIES" "VENUES"}}
+           (resolve-and-return-cached-metadata
+            (lib.tu.macros/mbql-query venues
+              {:joins [{:source-query {:source-table $$categories}
+                        :alias        "c"
+                        :condition    [:= $category-id &c.categories.id]}]}))))))
 
-;; Does `resolve-source-tables` resolve source tables inside nested source queries inside joins?
-(expect
-  {:database "test-data", :tables #{"CATEGORIES" "VENUES"}, :fields #{}}
-  (with-store-contents
-    (resolve-source-tables
-     (data/mbql-query venues
-       {:joins [{:source-query {:source-table $$categories}
-                 :alias        "c"
-                 :condition    [:= $category_id [:joined-field "c" $categories.id]]}]}))))
+(deftest ^:parallel nested-queries-in-joins-in-nested-queries-test
+  (testing (str "Does `resolve-source-tables` resolve source tables inside nested source queries inside joins inside "
+                "nested source queries?")
+    (is (= {:tables #{"CATEGORIES" "VENUES"}}
+           (resolve-and-return-cached-metadata
+            (lib.tu.macros/mbql-query venues
+              {:source-query {:source-table $$venues
+                              :joins        [{:source-query {:source-table $$categories}
+                                              :alias        "c"
+                                              :condition    [:= $category-id &c.categories.id]}]}}))))))
 
-;; Does `resolve-source-tables` resolve source tables inside nested source queries inside joins inside nested source
-;; queries?
-(expect
-  {:database "test-data", :tables #{"CATEGORIES" "VENUES"}, :fields #{}}
-  (with-store-contents
-    (resolve-source-tables
-     (data/mbql-query venues
-       {:source-table $$venues
-        :source-query {:joins [{:source-query {:source-table $$categories}
-                                :alias        "c"
-                                :condition    [:= $category_id [:joined-field "c" $categories.id]]}]}}))))
+(deftest ^:parallel disallow-joins-against-table-on-different-db-test
+  (testing "Test that joining against a table in a different DB throws an Exception"
+    (let [mp (lib.tu/mock-metadata-provider
+              {:database meta/database
+               :tables   [(meta/table-metadata :venues)]})]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"\QFailed to fetch :metadata/table\E"
+           (qp.resolve-source-table/resolve-source-tables
+            (lib/query
+             mp
+             (lib.tu.macros/mbql-query venues
+               {:joins [{:source-table (meta/id :categories)
+                         :alias        "t"
+                         :condition    [:= $category-id 1]}]}))))))))

@@ -1,108 +1,158 @@
-import Utils from "metabase/lib/utils";
+import { assoc, merge } from "icepick";
 import { handleActions } from "redux-actions";
-import { assoc, dissoc } from "icepick";
+import _ from "underscore";
 
 import {
-  RESET_QB,
-  INITIALIZE_QB,
-  TOGGLE_DATA_REFERENCE,
-  TOGGLE_TEMPLATE_TAGS_EDITOR,
-  TOGGLE_SNIPPET_SIDEBAR,
-  SET_IS_SHOWING_TEMPLATE_TAGS_EDITOR,
-  SET_NATIVE_EDITOR_SELECTED_RANGE,
-  SET_MODAL_SNIPPET,
-  SET_SNIPPET_COLLECTION_ID,
-  CLOSE_QB_NEWB_MODAL,
-  RELOAD_CARD,
+  EDIT_QUESTION,
+  NAVIGATE_TO_NEW_CARD,
+} from "metabase/dashboard/actions";
+import { TimelineEvents } from "metabase/entities/timeline-events";
+import { copy } from "metabase/lib/utils";
+
+import {
   API_CREATE_QUESTION,
   API_UPDATE_QUESTION,
-  SET_CARD_AND_RUN,
-  UPDATE_TEMPLATE_TAG,
-  SET_PARAMETER_VALUE,
-  UPDATE_QUESTION,
-  RUN_QUERY,
-  CLEAR_QUERY_RESULT,
   CANCEL_QUERY,
+  CANCEL_QUESTION_CHANGES,
+  CLEAR_OBJECT_DETAIL_FK_REFERENCES,
+  CLEAR_QUERY_RESULT,
+  CLOSE_QB,
+  CLOSE_QB_NEWB_MODAL,
+  DESELECT_TIMELINE_EVENTS,
+  HIDE_TIMELINE_EVENTS,
+  INITIALIZE_QB,
+  LOAD_OBJECT_DETAIL_FK_REFERENCES,
+  OPEN_DATA_REFERENCE_AT_QUESTION,
   QUERY_COMPLETED,
   QUERY_ERRORED,
-  LOAD_OBJECT_DETAIL_FK_REFERENCES,
-  CLEAR_OBJECT_DETAIL_FK_REFERENCES,
-  SET_CURRENT_STATE,
-  CREATE_PUBLIC_LINK,
-  DELETE_PUBLIC_LINK,
-  UPDATE_ENABLE_EMBEDDING,
-  UPDATE_EMBEDDING_PARAMS,
-  SHOW_CHART_SETTINGS,
-  SET_UI_CONTROLS,
+  RELOAD_CARD,
+  RESET_QB,
+  RESET_ROW_ZOOM,
   RESET_UI_CONTROLS,
-  onEditSummary,
-  onCloseSummary,
-  onAddFilter,
-  onCloseFilter,
-  onOpenChartSettings,
+  RUN_QUERY,
+  SELECT_TIMELINE_EVENTS,
+  SET_CARD_AND_RUN,
+  SET_CURRENT_STATE,
+  SET_DATA_REFERENCE_STACK,
+  SET_DOCUMENT_TITLE,
+  SET_DOCUMENT_TITLE_TIMEOUT_ID,
+  SET_IS_SHOWING_TEMPLATE_TAGS_EDITOR,
+  SET_METADATA_DIFF,
+  SET_MODAL_SNIPPET,
+  SET_NATIVE_EDITOR_SELECTED_RANGE,
+  SET_PARAMETER_VALUE,
+  SET_SHOW_LOADING_COMPLETE_FAVICON,
+  SET_SNIPPET_COLLECTION_ID,
+  SET_UI_CONTROLS,
+  SHOW_CHART_SETTINGS,
+  SHOW_TIMELINE_EVENTS,
+  TOGGLE_DATA_REFERENCE,
+  TOGGLE_SNIPPET_SIDEBAR,
+  TOGGLE_TEMPLATE_TAGS_EDITOR,
+  UPDATE_QUESTION,
+  ZOOM_IN_ROW,
+  onCloseAIQuestionAnalysisSidebar,
   onCloseChartSettings,
-  onOpenChartType,
   onCloseChartType,
+  onCloseQuestionInfo,
+  onCloseQuestionSettings,
   onCloseSidebars,
+  onCloseSummary,
+  onCloseTimelines,
+  onEditSummary,
+  onOpenAIQuestionAnalysisSidebar,
+  onOpenChartSettings,
+  onOpenChartType,
+  onOpenQuestionInfo,
+  onOpenQuestionSettings,
+  onOpenTimelines,
 } from "./actions";
+import {
+  CLOSED_NATIVE_EDITOR_SIDEBARS,
+  DEFAULT_LOADING_CONTROLS,
+  DEFAULT_PARENT_ENTITY_STATE,
+  DEFAULT_QUERY_STATUS,
+  DEFAULT_UI_CONTROLS,
+  UI_CONTROLS_SIDEBAR_DEFAULTS,
+} from "./defaults";
 
-const DEFAULT_UI_CONTROLS = {
-  isShowingDataReference: false,
-  isShowingTemplateTagsEditor: false,
-  isShowingNewbModal: false,
-  isEditing: false,
-  isRunning: false,
-  isShowingSummarySidebar: false,
-  isShowingFilterSidebar: false,
-  isShowingChartTypeSidebar: false,
-  isShowingChartSettingsSidebar: false,
-  initialChartSetting: null,
-  isPreviewing: true, // sql preview mode
-  isShowingRawTable: false, // table/viz toggle
-  queryBuilderMode: false, // "view" or "notebook"
-  snippetCollectionId: null,
-};
+function setUIControls(state, changes) {
+  const { queryBuilderMode: currentQBMode, ...currentState } = state;
+  const { queryBuilderMode: nextQBMode, ...nextStateChanges } = changes;
 
-const UI_CONTROLS_SIDEBAR_DEFAULTS = {
-  isShowingSummarySidebar: false,
-  isShowingFilterSidebar: false,
-  isShowingChartSettingsSidebar: false,
-  isShowingChartTypeSidebar: false,
-};
+  const isChangingQBMode = nextQBMode && currentQBMode !== nextQBMode;
+  const isOpeningEditingQBMode = isChangingQBMode && nextQBMode !== "view";
 
-// this is used to close toher sidebar when one is updated
-const CLOSED_NATIVE_EDITOR_SIDEBARS = {
-  isShowingTemplateTagsEditor: false,
-  isShowingSnippetSidebar: false,
-  isShowingDataReference: false,
-};
+  const queryBuilderMode = nextQBMode || currentQBMode;
+  const previousQueryBuilderMode = isChangingQBMode
+    ? currentQBMode
+    : state.previousQueryBuilderMode;
 
-// various ui state options
+  // Close all the sidebars when entering notebook/dataset QB modes
+  const extraState = isOpeningEditingQBMode ? UI_CONTROLS_SIDEBAR_DEFAULTS : {};
+
+  return {
+    ...currentState,
+    ...extraState,
+    ...nextStateChanges,
+    queryBuilderMode,
+    previousQueryBuilderMode,
+  };
+}
+
 export const uiControls = handleActions(
   {
     [SET_UI_CONTROLS]: {
-      next: (state, { payload }) => ({ ...state, ...payload }),
+      next: (state, { payload }) => setUIControls(state, payload),
     },
 
     [RESET_UI_CONTROLS]: {
-      next: (state, { payload }) => DEFAULT_UI_CONTROLS,
-    },
-
-    [INITIALIZE_QB]: {
-      next: (state, { payload }) => ({
-        ...state,
+      next: (state) => ({
         ...DEFAULT_UI_CONTROLS,
-        ...CLOSED_NATIVE_EDITOR_SIDEBARS,
-        ...payload.uiControls,
+        isRunning: state.isRunning,
       }),
     },
 
+    [INITIALIZE_QB]: {
+      next: (state, { payload }) => {
+        return {
+          ...state,
+          ...DEFAULT_UI_CONTROLS,
+          ...payload.uiControls,
+        };
+      },
+    },
+
+    [UPDATE_QUESTION]: {
+      next: (state, { payload }) => ({
+        ...state,
+        highlightedNativeQueryLineNumbers:
+          DEFAULT_UI_CONTROLS.highlightedNativeQueryLineNumbers,
+      }),
+    },
     [TOGGLE_DATA_REFERENCE]: {
       next: (state, { payload }) => ({
         ...state,
         ...CLOSED_NATIVE_EDITOR_SIDEBARS,
         isShowingDataReference: !state.isShowingDataReference,
       }),
+    },
+    [SET_DATA_REFERENCE_STACK]: {
+      next: (state, { payload }) => ({
+        ...state,
+        dataReferenceStack: payload,
+      }),
+    },
+    [OPEN_DATA_REFERENCE_AT_QUESTION]: {
+      next: (state, { payload }) => {
+        return payload
+          ? {
+              ...state,
+              dataReferenceStack: payload,
+              isShowingDataReference: true,
+            }
+          : state;
+      },
     },
     [TOGGLE_TEMPLATE_TAGS_EDITOR]: {
       next: (state, { payload }) => ({
@@ -142,19 +192,20 @@ export const uiControls = handleActions(
       next: (state, { payload }) => ({ ...state, isShowingNewbModal: false }),
     },
 
-    [API_UPDATE_QUESTION]: {
-      next: (state, { payload }) => ({ ...state, isEditing: false }),
-    },
-    [RELOAD_CARD]: {
-      next: (state, { payload }) => ({ ...state, isEditing: false }),
-    },
-
-    [RUN_QUERY]: state => ({ ...state, isRunning: true }),
+    [RUN_QUERY]: (state) => ({
+      ...state,
+      isRunning: true,
+      highlightedNativeQueryLineNumbers:
+        DEFAULT_UI_CONTROLS.highlightedNativeQueryLineNumbers,
+    }),
     [CANCEL_QUERY]: {
       next: (state, { payload }) => ({ ...state, isRunning: false }),
     },
     [QUERY_COMPLETED]: {
-      next: (state, { payload }) => ({ ...state, isRunning: false }),
+      next: (state, { payload }) => ({
+        ...state,
+        isRunning: false,
+      }),
     },
     [QUERY_ERRORED]: {
       next: (state, { payload }) => ({ ...state, isRunning: false }),
@@ -163,49 +214,91 @@ export const uiControls = handleActions(
     [SHOW_CHART_SETTINGS]: {
       next: (state, { payload }) => ({
         ...state,
+        ...UI_CONTROLS_SIDEBAR_DEFAULTS,
         isShowingChartSettingsSidebar: true,
         initialChartSetting: payload,
       }),
     },
+    [CANCEL_QUESTION_CHANGES]: {
+      next: (state) => ({
+        ...state,
+        isModifiedFromNotebook: false,
+      }),
+    },
     // AGGREGATION
-    [onEditSummary]: state => ({
+    [onEditSummary]: (state) => ({
       ...state,
       ...UI_CONTROLS_SIDEBAR_DEFAULTS,
       isShowingSummarySidebar: true,
     }),
-    [onCloseSummary]: state => ({
+    [onCloseSummary]: (state) => ({
       ...state,
       ...UI_CONTROLS_SIDEBAR_DEFAULTS,
     }),
-    [onAddFilter]: state => ({
+    [onOpenAIQuestionAnalysisSidebar]: (state) => ({
       ...state,
       ...UI_CONTROLS_SIDEBAR_DEFAULTS,
-      isShowingFilterSidebar: true,
+      isShowingAIQuestionAnalysisSidebar: true,
     }),
-    [onCloseFilter]: state => ({
+    [onCloseAIQuestionAnalysisSidebar]: (state) => ({
       ...state,
       ...UI_CONTROLS_SIDEBAR_DEFAULTS,
     }),
-    [onOpenChartSettings]: (state, { payload: initial }) => ({
+    [onOpenChartSettings]: (
+      state,
+      { payload: { initialChartSettings, showSidebarTitle = false } = {} },
+    ) => ({
       ...state,
       ...UI_CONTROLS_SIDEBAR_DEFAULTS,
       isShowingChartSettingsSidebar: true,
-      initialChartSetting: initial,
+      initialChartSetting: initialChartSettings,
+      showSidebarTitle: showSidebarTitle,
     }),
-    [onCloseChartSettings]: state => ({
+    [onCloseChartSettings]: (state) => ({
       ...state,
       ...UI_CONTROLS_SIDEBAR_DEFAULTS,
     }),
-    [onOpenChartType]: state => ({
+    [onOpenChartType]: (state) => ({
       ...state,
       ...UI_CONTROLS_SIDEBAR_DEFAULTS,
       isShowingChartTypeSidebar: true,
     }),
-    [onCloseChartType]: state => ({
+    [onCloseChartType]: (state) => ({
       ...state,
       ...UI_CONTROLS_SIDEBAR_DEFAULTS,
     }),
-    [onCloseSidebars]: state => ({
+    [onOpenQuestionInfo]: (state) =>
+      setUIControls(state, {
+        ...UI_CONTROLS_SIDEBAR_DEFAULTS,
+        ...CLOSED_NATIVE_EDITOR_SIDEBARS,
+        isShowingQuestionInfoSidebar: true,
+        queryBuilderMode: "view",
+      }),
+    [onCloseQuestionInfo]: (state) => ({
+      ...state,
+      isShowingQuestionInfoSidebar: false,
+    }),
+    [onOpenQuestionSettings]: (state) =>
+      setUIControls(state, {
+        ...UI_CONTROLS_SIDEBAR_DEFAULTS,
+        isShowingQuestionSettingsSidebar: true,
+        queryBuilderMode: "view",
+      }),
+    [onCloseQuestionSettings]: (state) => ({
+      ...state,
+      isShowingQuestionSettingsSidebar: false,
+    }),
+    [onOpenTimelines]: (state) => ({
+      ...state,
+      ...UI_CONTROLS_SIDEBAR_DEFAULTS,
+      ...CLOSED_NATIVE_EDITOR_SIDEBARS,
+      isShowingTimelineSidebar: true,
+    }),
+    [onCloseTimelines]: (state) => ({
+      ...state,
+      ...UI_CONTROLS_SIDEBAR_DEFAULTS,
+    }),
+    [onCloseSidebars]: (state) => ({
       ...state,
       ...UI_CONTROLS_SIDEBAR_DEFAULTS,
     }),
@@ -213,47 +306,43 @@ export const uiControls = handleActions(
   DEFAULT_UI_CONTROLS,
 );
 
-// the card that is actively being worked on
-export const card = handleActions(
+export const loadingControls = handleActions(
   {
-    [RESET_QB]: { next: (state, { payload }) => null },
+    [SET_DOCUMENT_TITLE]: (state, { payload }) => ({
+      ...state,
+      documentTitle: payload,
+    }),
+    [SET_SHOW_LOADING_COMPLETE_FAVICON]: (state, { payload }) => ({
+      ...state,
+      showLoadCompleteFavicon: payload,
+    }),
+    [SET_DOCUMENT_TITLE_TIMEOUT_ID]: (state, { payload }) => ({
+      ...state,
+      timeoutId: payload,
+    }),
+  },
+  DEFAULT_LOADING_CONTROLS,
+);
+
+export const queryStatus = handleActions(
+  {
+    [RUN_QUERY]: (state) => "running",
+    [QUERY_COMPLETED]: (state) => "complete",
+    [CANCEL_QUERY]: (state) => "idle",
+  },
+  DEFAULT_QUERY_STATUS,
+);
+
+export const zoomedRowObjectId = handleActions(
+  {
     [INITIALIZE_QB]: {
-      next: (state, { payload }) => (payload ? payload.card : null),
+      next: (state, { payload }) => payload?.objectId ?? null,
     },
-    [RELOAD_CARD]: { next: (state, { payload }) => payload },
-    [SET_CARD_AND_RUN]: { next: (state, { payload }) => payload.card },
-    [API_CREATE_QUESTION]: { next: (state, { payload }) => payload },
-    [API_UPDATE_QUESTION]: { next: (state, { payload }) => payload },
-
-    [UPDATE_TEMPLATE_TAG]: { next: (state, { payload }) => payload },
-
-    [UPDATE_QUESTION]: (state, { payload: { card } }) => card,
-
-    [QUERY_COMPLETED]: {
-      next: (state, { payload }) => ({
-        ...state,
-        display: payload.card.display,
-      }),
+    [ZOOM_IN_ROW]: {
+      next: (state, { payload }) => payload.objectId,
     },
-
-    [CREATE_PUBLIC_LINK]: {
-      next: (state, { payload }) => ({ ...state, public_uuid: payload.uuid }),
-    },
-    [DELETE_PUBLIC_LINK]: {
-      next: (state, { payload }) => ({ ...state, public_uuid: null }),
-    },
-    [UPDATE_ENABLE_EMBEDDING]: {
-      next: (state, { payload }) => ({
-        ...state,
-        enable_embedding: payload.enable_embedding,
-      }),
-    },
-    [UPDATE_EMBEDDING_PARAMS]: {
-      next: (state, { payload }) => ({
-        ...state,
-        embedding_params: payload.embedding_params,
-      }),
-    },
+    [RESET_ROW_ZOOM]: { next: () => null },
+    [RESET_QB]: { next: () => null },
   },
   null,
 );
@@ -266,20 +355,20 @@ export const originalCard = handleActions(
   {
     [INITIALIZE_QB]: {
       next: (state, { payload }) =>
-        payload.originalCard ? Utils.copy(payload.originalCard) : null,
+        payload.originalCard ? copy(payload.originalCard) : null,
     },
     [RELOAD_CARD]: {
-      next: (state, { payload }) => (payload.id ? Utils.copy(payload) : null),
+      next: (state, { payload }) => (payload.id ? copy(payload) : null),
     },
     [SET_CARD_AND_RUN]: {
       next: (state, { payload }) =>
-        payload.originalCard ? Utils.copy(payload.originalCard) : null,
+        payload.originalCard ? copy(payload.originalCard) : null,
     },
     [API_CREATE_QUESTION]: {
-      next: (state, { payload }) => Utils.copy(payload),
+      next: (state, { payload }) => copy(payload),
     },
     [API_UPDATE_QUESTION]: {
-      next: (state, { payload }) => Utils.copy(payload),
+      next: (state, { payload }) => copy(payload),
     },
   },
   null,
@@ -310,7 +399,7 @@ export const queryResults = handleActions(
   {
     [RESET_QB]: { next: (state, { payload }) => null },
     [QUERY_COMPLETED]: {
-      next: (state, { payload }) => payload.queryResults,
+      next: (state, { payload: { queryResults } }) => queryResults,
     },
     [QUERY_ERRORED]: {
       next: (state, { payload }) => (payload ? [payload] : state),
@@ -318,6 +407,25 @@ export const queryResults = handleActions(
     [CLEAR_QUERY_RESULT]: { next: (state, { payload }) => null },
   },
   null,
+);
+
+export const metadataDiff = handleActions(
+  {
+    [RESET_QB]: { next: () => ({}) },
+    [API_CREATE_QUESTION]: { next: () => ({}) },
+    [API_UPDATE_QUESTION]: { next: () => ({}) },
+    [SET_METADATA_DIFF]: {
+      next: (state, { payload }) => {
+        const { name, changes } = payload;
+        return {
+          ...state,
+          [name]: state[name] ? merge(state[name], changes) : changes,
+        };
+      },
+    },
+    [CANCEL_QUESTION_CHANGES]: { next: () => ({}) },
+  },
+  {},
 );
 
 // promise used for tracking a query execution in progress.  when a query is started we capture this.
@@ -346,9 +454,11 @@ export const queryStartTime = handleActions(
 
 export const parameterValues = handleActions(
   {
+    [INITIALIZE_QB]: {
+      next: (state, { payload: { parameterValues } }) => parameterValues,
+    },
     [SET_PARAMETER_VALUE]: {
-      next: (state, { payload: { id, value } }) =>
-        value == null ? dissoc(state, id) : assoc(state, id, value),
+      next: (state, { payload: { id, value } }) => assoc(state, id, value),
     },
   },
   {},
@@ -360,3 +470,64 @@ export const currentState = handleActions(
   },
   null,
 );
+
+export const parentEntity = handleActions(
+  {
+    [NAVIGATE_TO_NEW_CARD]: {
+      next: (_state, { payload: { id, model, name } }) => ({
+        id,
+        model,
+        name,
+        isEditing: false,
+      }),
+    },
+    [EDIT_QUESTION]: {
+      next: (_state, { payload: { id, model, name } }) => ({
+        id,
+        model,
+        name,
+        isEditing: true,
+      }),
+    },
+    [CLOSE_QB]: { next: () => DEFAULT_PARENT_ENTITY_STATE },
+  },
+  DEFAULT_PARENT_ENTITY_STATE,
+);
+
+export const visibleTimelineEventIds = handleActions(
+  {
+    [INITIALIZE_QB]: { next: () => [] },
+    [SHOW_TIMELINE_EVENTS]: {
+      next: (state, { payload: events }) =>
+        _.uniq([...state, ...events.map((event) => event.id)]),
+    },
+    [HIDE_TIMELINE_EVENTS]: {
+      next: (state, { payload: events }) => {
+        const eventIdsToHide = events.map((event) => event.id);
+        return state.filter((eventId) => !eventIdsToHide.includes(eventId));
+      },
+    },
+    [TimelineEvents.actionTypes.CREATE]: {
+      next: (state, { payload }) => [...state, payload.timelineEvent.id],
+    },
+    [RESET_QB]: { next: () => [] },
+  },
+  [],
+);
+
+export const selectedTimelineEventIds = handleActions(
+  {
+    [INITIALIZE_QB]: { next: () => [] },
+    [SELECT_TIMELINE_EVENTS]: {
+      next: (state, { payload: events = [] }) => events.map((e) => e.id),
+    },
+    [DESELECT_TIMELINE_EVENTS]: {
+      next: () => [],
+    },
+    [onCloseTimelines]: { next: () => [] },
+    [RESET_QB]: { next: () => [] },
+  },
+  [],
+);
+
+export * from "./reducers-typed";

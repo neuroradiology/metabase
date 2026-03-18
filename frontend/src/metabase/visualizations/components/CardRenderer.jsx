@@ -1,34 +1,11 @@
-/* @flow */
-
-import React, { Component } from "react";
+/* eslint-disable react/prop-types */
 import PropTypes from "prop-types";
-import ReactDOM from "react-dom";
-import _ from "underscore";
+import { Component, forwardRef } from "react";
 
-import ExplicitSize from "metabase/components/ExplicitSize";
-import MetabaseAnalytics from "metabase/lib/analytics";
-import { startTimer } from "metabase/lib/performance";
-
+import { ExplicitSize } from "metabase/common/components/ExplicitSize";
 import { isSameSeries } from "metabase/visualizations/lib/utils";
 
-import type { VisualizationProps } from "metabase-types/types/Visualization";
-
-type DeregisterFunction = () => void;
-
-type Props = VisualizationProps & {
-  renderer: (element: Element, props: VisualizationProps) => DeregisterFunction,
-  style?: any,
-};
-
-// We track this as part of the render loop.
-// It's throttled to prevent pounding GA on every prop update.
-// $FlowFixMe
-const trackEventThrottled = _.throttle(MetabaseAnalytics.trackEvent, 10000);
-
-@ExplicitSize({ wrapped: true })
-export default class CardRenderer extends Component {
-  props: Props;
-
+class CardRendererInner extends Component {
   static propTypes = {
     className: PropTypes.string,
     series: PropTypes.array.isRequired,
@@ -38,9 +15,9 @@ export default class CardRenderer extends Component {
     isDashboard: PropTypes.bool,
   };
 
-  _deregister: ?DeregisterFunction;
+  containerRef = null;
 
-  shouldComponentUpdate(nextProps: Props) {
+  shouldComponentUpdate(nextProps) {
     // a chart only needs re-rendering when the result itself changes OR the chart type is different
     const sameSize =
       this.props.width === nextProps.width &&
@@ -70,12 +47,15 @@ export default class CardRenderer extends Component {
   }
 
   renderChart() {
-    const { width, height, isDashboard, isEditing, isSettings } = this.props;
+    const { width, height } = this.props;
     if (width == null || height == null) {
       return;
     }
 
-    const parent = ReactDOM.findDOMNode(this);
+    const parent = this.containerRef;
+    if (!parent) {
+      return;
+    }
 
     // deregister previous chart:
     this._deregisterChart();
@@ -89,29 +69,43 @@ export default class CardRenderer extends Component {
     const element = document.createElement("div");
     parent.appendChild(element);
 
-    if (isDashboard && isEditing && !isSettings) {
-      // If this card is a dashboard that's currently being edited, we cover the
-      // content to prevent interaction with the chart. The !isSettings
-      // exception is to handle modals that appear above a dashboard.
-      const mouseBlocker = document.createElement("div");
-      mouseBlocker.classList.add("spread");
-      mouseBlocker.style.setProperty("pointer-events", "all");
-      parent.appendChild(mouseBlocker);
-    }
-
     try {
-      const t = startTimer();
       this._deregister = this.props.renderer(element, this.props);
-      t(duration => {
-        const { display } = this.props.card;
-        trackEventThrottled("Visualization", "Render Card", display, duration);
-      });
     } catch (err) {
       console.error(err);
+      this.props.onRenderError(err.message || err);
     }
   }
 
   render() {
-    return <div className={this.props.className} style={this.props.style} />;
+    return (
+      <div
+        className={this.props.className}
+        style={this.props.style}
+        ref={(element) => {
+          this.containerRef = element;
+
+          if (this.props.forwardedRef) {
+            if (typeof this.props.forwardedRef === "function") {
+              this.props.forwardedRef(element);
+            } else {
+              this.props.forwardedRef.current = element;
+            }
+          }
+        }}
+      />
+    );
   }
 }
+
+const CardRendererWithRef = forwardRef(
+  function _CardRendererWithRef(props, ref) {
+    return <CardRendererInner {...props} forwardedRef={ref} />;
+  },
+);
+
+export const CardRenderer = ExplicitSize({
+  wrapped: true,
+  // Avoid using debounce when isDashboard=true because there should not be any initial delay when rendering cards
+  refreshMode: (props) => (props.isDashboard ? "debounceLeading" : "throttle"),
+})(CardRendererWithRef);

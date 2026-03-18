@@ -1,196 +1,203 @@
-/* @flow weak */
-
-import React, { Component } from "react";
-import { t } from "ttag";
-
-import LoadingSpinner from "metabase/components/LoadingSpinner";
-
-import VisualizationError from "./VisualizationError";
-import VisualizationResult from "./VisualizationResult";
-import Warnings from "./Warnings";
-import RunButtonWithTooltip from "./RunButtonWithTooltip";
-
-import Utils from "metabase/lib/utils";
-
+/* eslint-disable react/prop-types */
 import cx from "classnames";
+import { useState } from "react";
+import { useTimeout } from "react-use";
+import { c, t } from "ttag";
 
-import Question from "metabase-lib/lib/Question";
-import type Database from "metabase-lib/lib/metadata/Database";
-import type Table from "metabase-lib/lib/metadata/Table";
-import type { DatasetQuery } from "metabase-types/types/Card";
+import EmptyCodeResult from "assets/img/empty-states/code.svg";
+import { LoadingSpinner } from "metabase/common/components/LoadingSpinner";
+import CS from "metabase/css/core/index.css";
+import QueryBuilderS from "metabase/css/query_builder.module.css";
+import { isMac } from "metabase/lib/browser";
+import { SERVER_ERROR_TYPES } from "metabase/lib/errors";
+import { useSelector } from "metabase/lib/redux";
+import { getWhiteLabeledLoadingMessageFactory } from "metabase/selectors/whitelabel";
+import { Box, Flex, Stack, Text, Title } from "metabase/ui";
+import * as Lib from "metabase-lib";
+import { HARD_ROW_LIMIT } from "metabase-lib/v1/queries/utils";
 
-import type { ParameterValues } from "metabase-types/types/Parameter";
+import { RunButtonWithTooltip } from "./RunButtonWithTooltip";
+import { VisualizationError } from "./VisualizationError";
+import { VisualizationResult } from "./VisualizationResult";
+import { Warnings } from "./Warnings";
 
-type Props = {
-  question: Question,
-  originalQuestion: Question,
-  result?: Object,
-  databases?: Database[],
-  tableMetadata?: Table,
-  tableForeignKeys?: [],
-  tableForeignKeyReferences?: {},
-  onUpdateVisualizationSettings: any => void,
-  onReplaceAllVisualizationSettings: any => void,
-  onOpenChartSettings: any => void,
-  cellIsClickableFn?: any => void,
-  cellClickedFn?: any => void,
-  isRunning: boolean,
-  isRunnable: boolean,
-  isAdmin: boolean,
-  isResultDirty: boolean,
-  isObjectDetail: boolean,
-  isNativeEditorOpen: boolean,
-  runQuestionQuery: any => void,
-  cancelQuery?: any => void,
-  className: string,
-};
+const SLOW_MESSAGE_TIMEOUT = 4000;
 
-type State = {
-  lastRunDatasetQuery: DatasetQuery,
-  lastRunParameterValues: ParameterValues,
-  warnings: string[],
-};
+export function QueryVisualization(props) {
+  const {
+    className,
+    question,
+    isRunnable,
+    isRunning,
+    isObjectDetail,
+    isResultDirty,
+    isNativeEditorOpen,
+    isDirtyStateShownForError,
+    result,
+    maxTableRows = HARD_ROW_LIMIT,
+  } = props;
 
-export default class QueryVisualization extends Component {
-  props: Props;
-  state: State;
+  const canRun = Lib.canRun(question.query(), question.type());
+  const [warnings, setWarnings] = useState([]);
+  const isDirtyStateShown =
+    canRun &&
+    isResultDirty &&
+    isRunnable &&
+    !isRunning &&
+    !isNativeEditorOpen &&
+    (result?.error == null ||
+      isDirtyStateShownForError ||
+      result.error_type === SERVER_ERROR_TYPES.missingRequiredParameter);
 
-  constructor(props, context) {
-    super(props, context);
-    this.state = this._getStateFromProps(props);
-  }
-
-  static defaultProps = {
-    // NOTE: this should be more dynamic from the backend, it's set based on the query lang
-    maxTableRows: 2000,
-  };
-
-  _getStateFromProps(props) {
-    return {
-      lastRunDatasetQuery: Utils.copy(props.question.query().datasetQuery()),
-      lastRunParameterValues: Utils.copy(props.parameterValues),
-    };
-  }
-
-  componentWillReceiveProps(nextProps) {
-    // whenever we are told that we are running a query lets update our understanding of the "current" query
-    if (nextProps.isRunning) {
-      this.setState(this._getStateFromProps(nextProps));
-    }
-  }
-
-  runQuery = () => {
-    const { isResultDirty } = this.props;
-    // ignore the cache if we're hitting "Refresh" (which we only show if isResultDirty = false)
-    this.props.runQuestionQuery({ ignoreCache: !isResultDirty });
-  };
-
-  handleUpdateWarnings = warnings => {
-    this.setState({ warnings });
-  };
-
-  render() {
-    const {
-      className,
-      question,
-      isRunning,
-      isObjectDetail,
-      isResultDirty,
-      isNativeEditorOpen,
-      result,
-    } = this.props;
-
-    return (
-      <div className={cx(className, "relative stacking-context")}>
-        {isRunning ? <VisualizationRunningState className="spread z2" /> : null}
-        <VisualizationDirtyState
-          {...this.props}
-          hidden={!isResultDirty || isRunning || isNativeEditorOpen}
-          className="spread z2"
+  return (
+    <div
+      className={cx(className, CS.relative, CS.stackingContext, CS.fullHeight)}
+    >
+      {isRunning ? (
+        <VisualizationRunningState className={cx(CS.spread, CS.z2)} />
+      ) : null}
+      <VisualizationDirtyState
+        {...props}
+        hidden={!isDirtyStateShown}
+        className={cx(CS.spread, CS.z2)}
+      />
+      {!isObjectDetail && (
+        <Warnings
+          warnings={warnings}
+          className={cx(CS.absolute, CS.top, CS.right, CS.mt2, CS.mr2, CS.z2)}
+          size={18}
         />
-        {!isObjectDetail && (
-          <Warnings
-            warnings={this.state.warnings}
-            className="absolute top right mt2 mr2 z2"
-            size={18}
-          />
+      )}
+      <div
+        className={cx(
+          CS.spread,
+          QueryBuilderS.Visualization,
+          {
+            [QueryBuilderS.VisualizationLoading]: isRunning,
+          },
+          CS.z1,
         )}
-        <div
-          className={cx("spread Visualization z1", {
-            "Visualization--errors": result && result.error,
-            "Visualization--loading": isRunning,
-          })}
-        >
-          {result && result.error ? (
-            <VisualizationError
-              className="spread"
-              error={result.error}
-              card={question.card()}
-              duration={result.duration}
-            />
-          ) : result && result.data ? (
-            <VisualizationResult
-              {...this.props}
-              className="spread"
-              lastRunDatasetQuery={this.state.lastRunDatasetQuery}
-              onUpdateWarnings={this.handleUpdateWarnings}
-            />
-          ) : !isRunning ? (
-            <VisualizationEmptyState className="spread" />
-          ) : null}
-        </div>
+        data-testid="query-visualization-root"
+      >
+        {result?.error ? (
+          <VisualizationError
+            className={CS.spread}
+            error={result.error}
+            errorType={result.error_type}
+            via={result.via}
+            question={question}
+            duration={result.duration}
+          />
+        ) : result?.data ? (
+          <VisualizationResult
+            {...props}
+            maxTableRows={maxTableRows}
+            className={CS.spread}
+            onUpdateWarnings={setWarnings}
+          />
+        ) : !isRunning && !isDirtyStateShown ? (
+          <VisualizationEmptyState className={CS.spread}>
+            {t`Here's where your results will appear`}
+          </VisualizationEmptyState>
+        ) : null}
       </div>
-    );
-  }
+    </div>
+  );
 }
 
-export const VisualizationEmptyState = ({ className }) => (
-  <div className={cx(className, "flex flex-column layout-centered text-light")}>
-    <h3>{t`Here's where your results will appear`}</h3>
-  </div>
-);
+const VisualizationEmptyState = ({ children }) => {
+  const keyboardShortcut = getRunQueryShortcut();
 
-export const VisualizationRunningState = ({ className }) => (
-  <div
-    className={cx(
-      className,
-      "Loading flex flex-column layout-centered text-brand",
-    )}
-  >
-    <LoadingSpinner />
-    <h2 className="Loading-message text-brand text-uppercase my3">
-      {t`Doing science`}...
-    </h2>
-  </div>
-);
+  return (
+    <Flex w="100%" h="100%" align="center" justify="center">
+      <Stack maw="25rem" gap={0} ta="center" align="center">
+        <Box maw="3rem" mb="0.75rem">
+          <img src={EmptyCodeResult} alt="Code prompt icon" />
+        </Box>
+        <Text c="text-secondary">
+          {c("{0} refers to the keyboard shortcut")
+            .jt`To run your code, click on the Run button or type ${(
+            <b key="shortcut">({keyboardShortcut})</b>
+          )}`}
+        </Text>
+        <Text c="text-secondary">{children}</Text>
+      </Stack>
+    </Flex>
+  );
+};
+
+export function VisualizationRunningState({ className = "" }) {
+  const [isSlow] = useTimeout(SLOW_MESSAGE_TIMEOUT);
+
+  const getLoadingMessage = useSelector(getWhiteLabeledLoadingMessageFactory);
+
+  // show the slower loading message only when the loadingMessage is
+  // not customized
+  const message = getLoadingMessage(isSlow());
+
+  return (
+    <Flex
+      className={cx(className, QueryBuilderS.Overlay)}
+      c="brand"
+      direction="column"
+      justify="center"
+      align="center"
+    >
+      <LoadingSpinner />
+      <Title c="brand" order={3} mt="lg">
+        {message}
+      </Title>
+    </Flex>
+  );
+}
 
 export const VisualizationDirtyState = ({
   className,
   result,
-  isRunnable,
   isRunning,
   isResultDirty,
   runQuestionQuery,
   cancelQuery,
   hidden,
-}) => (
-  <div
-    className={cx(className, "Loading flex flex-column layout-centered", {
-      "Loading--hidden pointer-events-none": hidden,
-    })}
-  >
-    <RunButtonWithTooltip
-      className="shadowed"
-      circular
-      compact
-      py={2}
-      px={3}
-      result={result}
-      hidden={!isRunnable || hidden}
-      isRunning={isRunning}
-      isDirty={isResultDirty}
-      onRun={() => runQuestionQuery({ ignoreCache: true })}
-      onCancel={() => cancelQuery()}
-    />
-  </div>
-);
+}) => {
+  const keyboardShortcut = getRunQueryShortcut();
+
+  const handleClick = () => {
+    if (!hidden) {
+      if (isRunning) {
+        cancelQuery();
+      } else {
+        runQuestionQuery();
+      }
+    }
+  };
+
+  return (
+    <Flex
+      className={cx(className, QueryBuilderS.Overlay, {
+        [QueryBuilderS.OverlayActive]: !hidden,
+        [QueryBuilderS.OverlayHidden]: hidden,
+      })}
+      direction="column"
+      justify="center"
+      align="center"
+      gap="sm"
+      data-testid="run-button-overlay"
+      onClick={handleClick}
+    >
+      <RunButtonWithTooltip
+        className={CS.shadowed}
+        iconSize={32}
+        circular
+        hidden={hidden}
+        isRunning={isRunning}
+        isDirty={isResultDirty}
+      />
+      {!hidden && <Text c="text-secondary">{keyboardShortcut}</Text>}
+    </Flex>
+  );
+};
+
+function getRunQueryShortcut() {
+  return isMac() ? t`⌘ + return` : t`Ctrl + enter`;
+}

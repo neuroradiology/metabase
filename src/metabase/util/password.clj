@@ -1,16 +1,19 @@
 (ns metabase.util.password
   "Utility functions for checking passwords against hashes and for making sure passwords match complexity requirements."
-  (:require [cemerick.friend.credentials :as creds]
-            [metabase
-             [config :as config]
-             [util :as u]]))
+  (:require
+   [clojure.java.io :as io]
+   [metabase.config.core :as config]
+   [metabase.util :as u])
+  (:import
+   (org.mindrot.jbcrypt BCrypt)))
 
+(set! *warn-on-reflection* true)
 
 (defn- count-occurrences
   "Return a map of the counts of each class of character for `password`.
 
     (count-occurrences \"GoodPw!!\")
-      -> {:total  8, :lower 4, :upper 2, :letter 6, :digit 0, :special 2}"
+      -> {:total 8, :lower 4, :upper 2, :letter 6, :digit 0, :special 2}"
   [password]
   (loop [[^Character c & more] password, counts {:total 0, :lower 0, :upper 0, :letter 0, :digit 0, :special 0}]
     (if-not c
@@ -43,23 +46,72 @@
   [char-type->min password]
   {:pre [(map? char-type->min)
          (string? password)]}
-  (let [occurances (count-occurrences password)]
+  (let [occurrences (count-occurrences password)]
     (boolean (loop [[[char-type min-count] & more] (seq char-type->min)]
-               (if-not char-type true
-                 (when (>= (occurances char-type) min-count)
+               (if-not char-type
+                 true
+                 (when (>= (occurrences char-type) min-count)
                    (recur more)))))))
 
-(def active-password-complexity
+(defn active-password-complexity
   "The currently configured description of the password complexity rules being enforced"
+  []
   (merge (complexity->char-type->min (config/config-kw :mb-password-complexity))
          ;; Setting MB_PASSWORD_LENGTH overrides the default :total for a given password complexity class
          (when-let [min-len (config/config-int :mb-password-length)]
            {:total min-len})))
 
-(def ^{:arglists '([password])} is-complex?
+(defn- is-complex?
   "Check if a given password meets complexity standards for the application."
-  (partial password-has-char-counts? active-password-complexity))
+  [password]
+  (password-has-char-counts? (active-password-complexity) password))
 
+(def ^java.net.URL common-passwords-url
+  "A set of ~12k common passwords to reject, that otherwise meet Metabase's default complexity requirements.
+  Sourced from Dropbox's zxcvbn repo: https://github.com/dropbox/zxcvbn/blob/master/data/passwords.txt"
+  (io/resource "common_passwords.txt"))
+
+(defn- is-uncommon?
+  "Check if a given password is not present in the common passwords set. Case-insensitive search since
+  the list only contains lower-case passwords."
+  [password]
+  (with-open [is (.openStream common-passwords-url)
+              reader (java.io.BufferedReader. (java.io.InputStreamReader. is))]
+    (not-any?
+     (partial = (u/lower-case-en password))
+     (iterator-seq (.. reader lines iterator)))))
+
+(defn is-valid?
+  "Check that a password both meets complexity standards, and is not present in the common passwords list.
+  Common password list is ignored if minimum password complexity is set to :weak"
+  [password]
+  (and (is-complex? password)
+       (or (= (config/config-kw :mb-password-complexity) :weak)
+           (is-uncommon? password))))
+
+(def ^:private default-bcrypt-work-factor
+  "Default work factor used for hashing passwords with BCrypt. Intentionally minimal for tests to reduce testing time."
+  (if config/is-test?
+    ;; 4 is the minimum supported value by jbcrypt library.
+    4
+    10))
+
+;; copied from cemerick.friend.credentials EPL v1.0 license
+(defn hash-bcrypt
+  "Hashes a given plaintext password using bcrypt and an optional
+   :work-factor (defaults to 10 as of this writing).  Should be used to hash
+   passwords included in stored user credentials that are to be later verified
+   using `bcrypt-credential-fn`."
+  [password & {:keys [work-factor]}]
+  (BCrypt/hashpw password (if work-factor
+                            (BCrypt/gensalt work-factor)
+                            (BCrypt/gensalt default-bcrypt-work-factor))))
+
+(defn bcrypt-verify
+  "Returns true if the plaintext [password] corresponds to [hash],
+the result of previously hashing that password."
+  [password hash]
+  (BCrypt/checkpw password hash))
 
 (defn verify-password
   "Verify if a given unhashed password + salt matches the supplied hashed-password. Returns `true` if matched, `false`
@@ -67,4 +119,4 @@
   ^Boolean [password salt hashed-password]
   ;; we wrap the friend/bcrypt-verify with this function specifically to avoid unintended exceptions getting out
   (boolean (u/ignore-exceptions
-             (creds/bcrypt-verify (str salt password) hashed-password))))
+             (bcrypt-verify (str salt password) hashed-password))))

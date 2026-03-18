@@ -1,27 +1,29 @@
 (ns metabase.test.initialize
   "Logic for initializing different components that need to be initialized when running tests."
-  (:require [clojure.string :as str]
-            [colorize.core :as colorize]
-            [metabase
-             [config :as config]
-             [util :as u]]
-            [metabase.plugins.classloader :as classloader]))
+  (:require
+   [clojure.string :as str]
+   [mb.hawk.init]
+   [metabase.classloader.core :as classloader]
+   [metabase.config.core :as config]
+   [metabase.notification.core :as notification]
+   [metabase.util :as u]
+   [metabase.util.log :as log]))
+
+(set! *warn-on-reflection* true)
 
 (defmulti ^:private do-initialization!
   "Perform component-specific initialization. This is guaranteed to only be called once."
-  {:arglists '([init-setp])}
+  {:arglists '([init-step])}
   keyword)
 
 (defn- log-init-message [task-name]
   (let [body   (format "| Initializing %s... |" task-name)
         border (str \+ (str/join (repeat (- (count body) 2) \-)) \+)]
-    (println
-     (colorize/blue
-      (str "\n"
-           (str/join "\n" [border body border])
-           "\n")))))
+    (log/info (u/colorize :blue (str "\n"
+                                     (str/join "\n" [border body border])
+                                     "\n")))))
 
-(def ^:private init-timeout-ms (* 30 1000))
+(def ^:private init-timeout-ms (u/seconds->ms 90))
 
 (def ^:private ^:dynamic *initializing*
   "Collection of components that are being currently initialized by the current thread."
@@ -41,8 +43,7 @@
       (u/with-timeout init-timeout-ms
         (do-initialization! step)))
     (catch Throwable e
-      (println "Error initializing" step)
-      (println e)
+      (log/fatalf e "Error initializing %s" step)
       (when config/is-test?
         (System/exit -1))
       (throw e))))
@@ -52,6 +53,10 @@
 
     (initialize-if-needed! :db :web-server)"
   [& steps]
+  ;; `:plugins` initialization is ok when loading test namespaces. Nothing else is tho (e.g. starting up the
+  ;; application DB, or starting up the web server).
+  (when-not (= steps [:plugins])
+    (mb.hawk.init/assert-tests-are-not-initializing (pr-str (cons 'initialize-if-needed! steps))))
   (doseq [step steps
           :let [step (keyword step)]]
     (when-not (@initialized step)
@@ -79,6 +84,15 @@
   (classloader/require 'metabase.test.initialize.plugins)
   ((resolve 'metabase.test.initialize.plugins/init!)))
 
+;; initialize test drivers that are not shipped as part of the product
+;; this is needed because if DRIVERS=all in the environment, then only the directories within modules are searched to
+;; determine the set of available drivers, so the "test only" drivers that live under test_modules will never be
+;; registered
+(define-initialization :test-drivers
+  (classloader/require 'metabase.test.initialize.plugins)
+  ((resolve 'metabase.test.initialize.plugins/init-test-drivers!)
+   [:driver-deprecation-test-legacy :driver-deprecation-test-new :secret-test-driver]))
+
 ;; initializing the DB also does setup needed so the scheduler will work correctly. (Remember that the scheduler uses
 ;; a JDBC backend!)
 (define-initialization :db
@@ -100,14 +114,20 @@
   (classloader/require 'metabase.test.initialize.test-users-personal-collections)
   ((resolve 'metabase.test.initialize.test-users-personal-collections/init!)))
 
-(define-initialization :events
-  (classloader/require 'metabase.test.initialize.events)
-  ((resolve 'metabase.test.initialize.events/init!)))
+(define-initialization :notifications
+  (initialize-if-needed! :db)
+  (notification/seed-notification!))
 
-(defn- all-components
+(define-initialization :row-lock
+  (initialize-if-needed! :db)
+  (classloader/require 'metabase.test.initialize.row-lock)
+  ((resolve 'metabase.test.initialize.row-lock/init!)))
+
+(defn all-components
   "Set of all components/initialization steps that are defined."
   []
   (set (keys (methods do-initialization!))))
 
-;; change the arglists for `initialize-if-needed!` to list all the possible args for REPL-usage convenience
+;; change the arglists for `initialize-if-needed!` to list all the possible args for REPL-usage convenience. Don't do
+;; this directly in `initialize-if-needed!` itself because it breaks Eastwood.
 (alter-meta! #'initialize-if-needed! assoc :arglists (list (into ['&] (sort (all-components)))))

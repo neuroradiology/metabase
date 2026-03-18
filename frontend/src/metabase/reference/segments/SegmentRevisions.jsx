@@ -1,37 +1,37 @@
-import React, { Component } from "react";
-import PropTypes from "prop-types";
-import { connect } from "react-redux";
-import { t } from "ttag";
+import cx from "classnames";
 import { getIn } from "icepick";
+import PropTypes from "prop-types";
+import { Component } from "react";
+import { t } from "ttag";
 
-import S from "metabase/components/List.css";
-
-import * as metadataActions from "metabase/redux/metadata";
+import { Revision } from "metabase/admin/datamodel/components/revisions/Revision";
+import { EmptyState } from "metabase/common/components/EmptyState";
+import S from "metabase/common/components/List/List.module.css";
+import { LoadingAndErrorWrapper } from "metabase/common/components/LoadingAndErrorWrapper";
+import CS from "metabase/css/core/index.css";
 import { assignUserColors } from "metabase/lib/formatting";
+import { connect } from "metabase/lib/redux";
+import * as metadataActions from "metabase/redux/metadata";
+import { getShallowTables as getTables } from "metabase/selectors/metadata";
 
+import ReferenceHeader from "../components/ReferenceHeader";
 import {
-  getSegmentRevisions,
-  getMetric,
-  getSegment,
-  getTables,
-  getUser,
-  getLoading,
   getError,
+  getLoading,
+  getSegment,
+  getSegmentRevisions,
+  getUser,
 } from "../selectors";
 
-import Revision from "metabase/admin/datamodel/components/revisions/Revision";
-import LoadingAndErrorWrapper from "metabase/components/LoadingAndErrorWrapper";
-import EmptyState from "metabase/components/EmptyState";
-import ReferenceHeader from "../components/ReferenceHeader";
-
 const emptyStateData = {
-  message: t`There are no revisions for this segment`,
+  get message() {
+    return t`There are no revisions for this segment`;
+  },
 };
 
 const mapStateToProps = (state, props) => {
   return {
     revisions: getSegmentRevisions(state, props),
-    metric: getMetric(state, props),
     segment: getSegment(state, props),
     tables: getTables(state, props),
     user: getUser(state, props),
@@ -44,15 +44,10 @@ const mapDispatchToProps = {
   ...metadataActions,
 };
 
-@connect(
-  mapStateToProps,
-  mapDispatchToProps,
-)
-export default class SegmentRevisions extends Component {
+class SegmentRevisions extends Component {
   static propTypes = {
     style: PropTypes.object.isRequired,
     revisions: PropTypes.object.isRequired,
-    metric: PropTypes.object.isRequired,
     segment: PropTypes.object.isRequired,
     tables: PropTypes.object.isRequired,
     user: PropTypes.object.isRequired,
@@ -61,23 +56,15 @@ export default class SegmentRevisions extends Component {
   };
 
   render() {
-    const {
-      style,
-      revisions,
-      metric,
-      segment,
-      tables,
-      user,
-      loading,
-      loadingError,
-    } = this.props;
+    const { style, revisions, segment, tables, user, loading, loadingError } =
+      this.props;
 
-    const entity = metric.id ? metric : segment;
+    const entity = segment;
 
     const userColorAssignments =
       user && Object.keys(revisions).length > 0
         ? assignUserColors(
-            Object.values(revisions).map(revision =>
+            Object.values(revisions).map((revision) =>
               getIn(revision, ["user", "id"]),
             ),
             user.id,
@@ -85,7 +72,7 @@ export default class SegmentRevisions extends Component {
         : {};
 
     return (
-      <div style={style} className="full">
+      <div style={style} className={CS.full} data-testid="segment-revisions">
         <ReferenceHeader
           name={t`Revision history for ${this.props.segment.name}`}
           headerIcon="segment"
@@ -96,16 +83,24 @@ export default class SegmentRevisions extends Component {
         >
           {() =>
             Object.keys(revisions).length > 0 && tables[entity.table_id] ? (
-              <div className="wrapper">
-                <div className="px3 py3 mb4 bg-white bordered">
+              <div className={CS.wrapper}>
+                <div
+                  className={cx(
+                    CS.px3,
+                    CS.py3,
+                    CS.mb4,
+                    CS.bgWhite,
+                    CS.bordered,
+                  )}
+                >
                   <div>
                     {Object.values(revisions)
-                      .map(revision =>
+                      .map((revision) =>
                         revision && revision.diff ? (
                           <Revision
                             key={revision.id}
                             revision={revision || {}}
-                            tableMetadata={tables[entity.table_id] || {}}
+                            tableId={entity.table_id}
                             objectName={entity.name}
                             currentUser={user || {}}
                             userColor={
@@ -131,3 +126,6 @@ export default class SegmentRevisions extends Component {
     );
   }
 }
+
+// eslint-disable-next-line import/no-default-export -- deprecated usage
+export default connect(mapStateToProps, mapDispatchToProps)(SegmentRevisions);

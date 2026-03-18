@@ -1,16 +1,40 @@
 (ns metabase.test.redefs
-  (:require [metabase.plugins.classloader :as classloader]
-            [toucan.util.test :as tt]))
+  "Redefinitions of vars from 3rd-party namespaces to make sure they do extra stuff we want (like initialize things if
+  needed when running)."
+  (:require
+   [mb.hawk.parallel]
+   [metabase.classloader.core :as classloader]
+   [metabase.test.util.thread-local :as tu.thread-local]
+   [methodical.core :as methodical]
+   [toucan2.connection :as t2.connection]
+   [toucan2.tools.with-temp]))
 
-;; wrap `do-with-temp` so it initializes the DB before doing the other stuff it usually does
-(when-not (::wrapped? (meta #'tt/do-with-temp))
-  (alter-var-root #'tt/do-with-temp (fn [f]
-                                      (fn [& args]
-                                        (classloader/require 'metabase.test.initialize)
-                                        ((resolve 'metabase.test.initialize/initialize-if-needed!) :db)
-                                        (classloader/require 'metabase.test.util) ; so with-temp-defaults are loaded
-                                        (apply f args))))
-  (alter-meta! #'tt/do-with-temp assoc ::wrapped? true))
+(def ^:dynamic ^:private *in-with-temp*
+  "Used to detect whether we're in a nested [[with-temp]]. Default is false."
+  false)
 
-;; mark `expect-with-temp` as deprecated -- it's not needed for `deftest`-style tests
-(alter-meta! #'tt/expect-with-temp assoc :deprecated true)
+(methodical/defmethod toucan2.tools.with-temp/do-with-temp* :around :default
+  "Initialize the DB before doing the other with-temp stuff.
+  Make sure metabase.test.util is loaded.
+  Run [[f]] in transaction by default, bind [[tu.thread-local/*thread-local*]] to false to disable this."
+  [model attributes f]
+  (classloader/require 'metabase.test.initialize)
+  ((resolve 'metabase.test.initialize/initialize-if-needed!) :db)
+  ;; so with-temp-defaults are loaded
+  (classloader/require 'metabase.test.util)
+  ;; run `f` in a transaction if it's the top-level with-temp
+  (if (and tu.thread-local/*thread-local* (not *in-with-temp*))
+    (binding [*in-with-temp* true]
+      (t2.connection/with-transaction [_ t2.connection/*current-connectable* {:rollback-only true}]
+        (next-method model attributes f)))
+    (next-method model attributes f)))
+
+;;; wrap `with-redefs-fn` (used by `with-redefs`) so it calls `assert-test-is-not-parallel`
+
+(defonce orig-with-redefs-fn with-redefs-fn)
+
+(defn new-with-redefs-fn [& args]
+  (mb.hawk.parallel/assert-test-is-not-parallel "with-redefs")
+  (apply orig-with-redefs-fn args))
+
+(alter-var-root #'with-redefs-fn (constantly new-with-redefs-fn))

@@ -1,22 +1,27 @@
 (ns metabase.api.common-test
-  (:require [expectations :refer [expect]]
-            [metabase.api.common :as api :refer :all]
-            [metabase.api.common.internal :refer :all]
-            [metabase.middleware
-             [exceptions :as mw.exceptions]
-             [misc :as mw.misc]
-             [security :as mw.security]]
-            [metabase.test.data :refer :all]
-            [metabase.util.schema :as su]))
+  (:require
+   [clojure.test :refer :all]
+   [mb.hawk.assert-exprs.approximately-equal :as hawk.approx]
+   [metabase.api.common :as api]
+   [metabase.events.core :as events]
+   [metabase.models.interface :as mi]
+   [metabase.server.middleware.exceptions :as mw.exceptions]
+   [metabase.server.middleware.misc :as mw.misc]
+   [metabase.server.middleware.security :as mw.security]
+   [metabase.test :as mt]
+   [methodical.core :as methodical])
+  (:import (clojure.lang ExceptionInfo)))
 
 ;;; TESTS FOR CHECK (ETC)
 
-(def ^:private four-oh-four
+(defn- four-oh-four
   "The expected format of a 404 response."
+  []
   {:status  404
    :body    "Not found."
    :headers {"Cache-Control"                     "max-age=0, no-cache, must-revalidate, proxy-revalidate"
-             "Content-Security-Policy"           (-> @#'mw.security/content-security-policy-header vals first)
+             "Content-Security-Policy"           (str (-> (@#'mw.security/content-security-policy-header nil) vals first)
+                                                      " frame-ancestors 'none';")
              "Content-Type"                      "text/plain"
              "Expires"                           "Tue, 03 Jul 2001 06:00:00 GMT"
              "Last-Modified"                     true ; this will be current date, so do update-in ... string?
@@ -36,99 +41,142 @@
    identity
    (fn [e] (throw e))))
 
-(defn- my-mock-api-fn []
+(defn my-mock-api-fn []
   (mock-api-fn
    (fn [_]
-     (check-404 @*current-user*)
+     (api/check-404 @api/*current-user*)
      {:status 200
-      :body   @*current-user*})))
+      :body   @api/*current-user*})))
 
-; check that `check-404` doesn't throw an exception if TEST is true
-(expect
-  {:status  200
-   :body    "Cam Saul"
-   :headers {"Content-Type" "text/plain"}}
-  (binding [*current-user* (atom "Cam Saul")]
-    (my-mock-api-fn)))
+(deftest ^:parallel check-404-test
+  (testing "check that `check-404` doesn't throw an exception if `test` is true"
+    (is (= {:status  200
+            :body    "Cam Saul"
+            :headers {"Content-Type" "text/plain"}}
+           (binding [api/*current-user* (atom "Cam Saul")]
+             (my-mock-api-fn)))))
 
-; check that 404 is returned otherwise
-(expect
-  four-oh-four
-  (-> (my-mock-api-fn)
-      (update-in [:headers "Last-Modified"] string?)))
+  (testing "check that 404 is returned otherwise"
+    (is (= (four-oh-four)
+           (-> (my-mock-api-fn)
+               (update-in [:headers "Last-Modified"] string?)))))
 
-;;let-404 should return nil if test fails
-(expect
-  four-oh-four
-  (-> (mock-api-fn
-       (fn [_]
-         (let-404 [user nil]
-           {:user user})))
-      (update-in [:headers "Last-Modified"] string?)))
+  (testing "let-404 should return nil if test fails"
+    (is (= (four-oh-four)
+           (-> (mock-api-fn
+                (fn [_]
+                  (api/let-404 [user nil]
+                    {:user user})))
+               (update-in [:headers "Last-Modified"] string?)))))
 
-;; otherwise let-404 should bind as expected
-(expect
-  {:user {:name "Cam"}}
-  ((mw.exceptions/catch-api-exceptions
-    (fn [_ respond _]
-      (respond
-       (let-404 [user {:name "Cam"}]
-         {:user user}))))
-   nil
-   identity
-   (fn [e] (throw e))))
+  (testing "otherwise let-404 should bind as expected"
+    (is (= {:user {:name "Cam"}}
+           ((mw.exceptions/catch-api-exceptions
+             (fn [_ respond _]
+               (respond
+                (api/let-404 [user {:name "Cam"}]
+                  {:user user}))))
+            nil
+            identity
+            (fn [e] (throw e)))))))
 
+(methodical/defmethod hawk.approx/=?-diff [java.util.regex.Pattern clojure.lang.Symbol]
+  [expected-re sym]
+  (hawk.approx/=?-diff expected-re (name sym)))
 
-(defmacro ^:private expect-expansion
-  "Helper to test that a macro expands the way we expect;
-   Automatically calls `macroexpand-1` on MACRO."
-  {:style/indent 0}
-  [expected-expansion macro]
-  `(let [actual-expansion# (macroexpand-1 '~macro)]
-     (expect '~expected-expansion
-       actual-expansion#)))
+(deftest parse-multi-values-param-test
+  (testing "single value returns a vector with 1 elem"
+    (is (= [1] (api/parse-multi-values-param "1" parse-long))))
 
+  (testing "multi values a vector as well"
+    (is (= [1 2 3] (api/parse-multi-values-param ["1" "2" "3"] parse-long)))))
 
-;;; TESTS FOR AUTO-PARSE
-;; TODO - these need to be moved to `metabase.api.common.internal-test`. But first `expect-expansion` needs to be put
-;; somewhere central
+;; set up for testing permission failure event publishing
+(def ^:dynamic *events* nil)
 
-;; when auto-parse gets an args form where arg is present in *autoparse-types*
-;; the appropriate let binding should be generated
-(expect-expansion (clojure.core/let [id (clojure.core/when id (metabase.api.common.internal/parse-int id))] 'body)
-                  (auto-parse [id] 'body))
+(methodical/defmethod events/publish-event! ::permission-failure-event
+  [topic event]
+  (swap! *events* conj [topic event]))
 
-;; params not in *autoparse-types* should be ignored
-(expect-expansion (clojure.core/let [id (clojure.core/when id (metabase.api.common.internal/parse-int id))] 'body)
-                  (auto-parse [id some-other-param] 'body))
+(deftest check-functions-publish-events
+  ;; setup - derive events so they get dispatched to our test method
+  (derive ::permission-failure-event :metabase/event)
+  (derive :event/write-permission-failure ::permission-failure-event)
+  (derive :event/update-permission-failure ::permission-failure-event)
+  (derive :event/create-permission-failure ::permission-failure-event)
 
-;; make sure multiple autoparse params work correctly
-(expect-expansion (clojure.core/let [id (clojure.core/when id (metabase.api.common.internal/parse-int id))
-                                     org_id (clojure.core/when org_id (metabase.api.common.internal/parse-int org_id))] 'body)
-                  (auto-parse [id org_id] 'body))
+  (try
+    (binding [api/*current-user-id* 1]
+      (with-redefs [mi/can-read? (constantly false)
+                    mi/can-write? (constantly false)
+                    mi/can-update? (constantly false)
+                    mi/can-create? (constantly false)]
+        (mt/with-temp [:model/Card card {}]
+          (testing "write-check"
+            (binding [*events* (atom [])]
+              (is (thrown? ExceptionInfo (api/write-check card)))
+              (is (= [[:event/write-permission-failure {:object card
+                                                        :user-id 1}]]
+                     @*events*))))
+          (testing "update-check"
+            (binding [*events* (atom [])]
+              (is (thrown? ExceptionInfo (api/update-check card card)))
+              (is (= [[:event/update-permission-failure {:object card
+                                                         :user-id 1}]]
+                     @*events*))))
+          (testing "create-check"
+            (binding [*events* (atom [])]
+              (is (thrown? ExceptionInfo (api/create-check :model/Collection {})))
+              (is (= [[:event/create-permission-failure {:model :model/Collection
+                                                         :user-id 1}]]
+                     @*events*)))))))
+    (finally
+      ;; teardown - underive events so they aren't dispatched in other tests
+      (underive ::permission-failure-event :metabase/event)
+      (underive :event/write-permission-failure ::permission-failure-event)
+      (underive :event/update-permission-failure ::permission-failure-event)
+      (underive :event/create-permission-failure ::permission-failure-event))))
 
-;; make sure it still works if no autoparse params are passed
-(expect-expansion (clojure.core/let [] 'body)
-                  (auto-parse [some-other-param] 'body))
+;;; ---------------------------------------- query-check tests ----------------------------------------
 
-;; should work with no params at all
-(expect-expansion (clojure.core/let [] 'body)
-                  (auto-parse [] 'body))
+(deftest query-check-returns-object-when-user-has-query-permissions-test
+  (testing "query-check returns object when user has query permissions"
+    (mt/with-temp [:model/Card card {}]
+      (with-redefs [mi/can-query? (constantly true)]
+        (is (= card (api/query-check card)))))))
 
-;; should work with some wacky binding form
-(expect-expansion (clojure.core/let [id (clojure.core/when id (metabase.api.common.internal/parse-int id))] 'body)
-                  (auto-parse [id :as {body :body}] 'body))
+(deftest query-check-throws-403-when-user-lacks-query-permissions-test
+  (testing "query-check throws 403 when user lacks query permissions"
+    (mt/with-temp [:model/Card card {}]
+      (with-redefs [mi/can-query? (constantly false)]
+        (is (thrown-with-msg? ExceptionInfo #"permissions"
+                              (api/query-check card)))))))
 
-;;; TESTS FOR DEFENDPOINT
+(deftest query-check-throws-404-for-nil-object-test
+  (testing "query-check throws 404 for nil object"
+    (is (thrown-with-msg? ExceptionInfo #"Not found"
+                          (api/query-check nil)))))
 
-;; replace regex `#"[0-9]+"` with str `"#[0-9]+" so expectations doesn't barf
-(binding [*auto-parse-types* (update-in *auto-parse-types* [:int :route-param-regex] (partial str "#"))]
-  (expect-expansion
-    (def GET_:id
-      (GET ["/:id" :id "#[0-9]+"] [id]
-           (metabase.api.common.internal/auto-parse [id]
-             (metabase.api.common.internal/validate-param 'id id su/IntGreaterThanZero)
-             (metabase.api.common.internal/wrap-response-if-needed (do (select-one Card :id id))))))
-    (defendpoint GET "/:id" [id]
-      {id su/IntGreaterThanZero}
-      (select-one Card :id id))))
+(deftest present-items-works
+  (testing "order is preserved"
+    (is (= [{:id 1 :model :foo} {:id 2 :model :foo} {:id 3 :model :foo}]
+           (api/present-items (fn [_ vs]
+                                (reverse vs))
+                              [{:id 1 :model :foo}
+                               {:id 2 :model :foo}
+                               {:id 3 :model :foo}]))))
+  (testing "duplicate IDs across different models are fine, order is maintained"
+    (is (= [{:id 1 :model :foo}
+            {:id 1 :model :bar}
+            {:id 2 :model :foo}
+            {:id 2 :model :bar}
+            {:id 3 :model :foo}
+            {:id 3 :model :bar}]
+           (api/present-items (fn [_ vs]
+                                (reverse vs))
+                              [{:id 1 :model :foo}
+                               {:id 1 :model :bar}
+                               {:id 2 :model :foo}
+                               {:id 2 :model :bar}
+                               {:id 3 :model :foo}
+                               {:id 3 :model :bar}])))))

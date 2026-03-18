@@ -1,14 +1,15 @@
 /* eslint "react/prop-types": "warn" */
-import React, { Component } from "react";
+import cx from "classnames";
 import PropTypes from "prop-types";
-import { connect } from "react-redux";
+import { Component } from "react";
 
-import BaseSidebar from "metabase/reference/guide/BaseSidebar";
-import SidebarLayout from "metabase/components/SidebarLayout";
-import SegmentList from "metabase/reference/segments/SegmentList";
-
+import { SidebarLayout } from "metabase/common/components/SidebarLayout";
+import CS from "metabase/css/core/index.css";
+import { connect } from "metabase/lib/redux";
 import * as metadataActions from "metabase/redux/metadata";
+import BaseSidebar from "metabase/reference/guide/BaseSidebar";
 import * as actions from "metabase/reference/reference";
+import { SegmentList } from "metabase/reference/segments/SegmentList";
 
 import { getDatabaseId, getIsEditing } from "../selectors";
 
@@ -22,11 +23,7 @@ const mapDispatchToProps = {
   ...actions,
 };
 
-@connect(
-  mapStateToProps,
-  mapDispatchToProps,
-)
-export default class SegmentListContainer extends Component {
+class SegmentListContainer extends Component {
   static propTypes = {
     params: PropTypes.object.isRequired,
     location: PropTypes.object.isRequired,
@@ -38,11 +35,11 @@ export default class SegmentListContainer extends Component {
     await actions.wrappedFetchSegments(this.props);
   }
 
-  componentWillMount() {
+  UNSAFE_componentWillMount() {
     this.fetchContainerData();
   }
 
-  componentWillReceiveProps(newProps) {
+  UNSAFE_componentWillReceiveProps(newProps) {
     if (this.props.location.pathname === newProps.location.pathname) {
       return;
     }
@@ -55,7 +52,7 @@ export default class SegmentListContainer extends Component {
 
     return (
       <SidebarLayout
-        className="flex-full relative"
+        className={cx(CS.flexFull, CS.relative)}
         style={isEditing ? { paddingTop: "43px" } : {}}
         sidebar={<BaseSidebar />}
       >
@@ -64,3 +61,9 @@ export default class SegmentListContainer extends Component {
     );
   }
 }
+
+// eslint-disable-next-line import/no-default-export -- deprecated usage
+export default connect(
+  mapStateToProps,
+  mapDispatchToProps,
+)(SegmentListContainer);

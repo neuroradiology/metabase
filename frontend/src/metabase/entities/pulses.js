@@ -1,58 +1,75 @@
-import { createEntity, undo } from "metabase/lib/entities";
-import * as Urls from "metabase/lib/urls";
-import { color } from "metabase/lib/colors";
+import { t } from "ttag";
 
 import {
-  canonicalCollectionId,
-  getCollectionType,
-} from "metabase/entities/collections";
-
-const Pulses = createEntity({
+  subscriptionApi,
+  useGetSubscriptionQuery,
+  useListSubscriptionsQuery,
+} from "metabase/api";
+import { getCollectionType } from "metabase/entities/collections/utils";
+import { color } from "metabase/lib/colors";
+import {
+  createEntity,
+  entityCompatibleQuery,
+  undo,
+} from "metabase/lib/entities";
+/**
+ * @deprecated use "metabase/api" instead
+ */
+export const Pulses = createEntity({
   name: "pulses",
+  nameOne: "pulse",
   path: "/api/pulse",
 
+  rtk: {
+    getUseGetQuery: () => ({
+      useGetQuery,
+    }),
+    useListQuery: useListSubscriptionsQuery,
+  },
+
+  api: {
+    list: (entityQuery, dispatch) =>
+      entityCompatibleQuery(
+        entityQuery,
+        dispatch,
+        subscriptionApi.endpoints.listSubscriptions,
+      ),
+    get: (entityQuery, options, dispatch) =>
+      entityCompatibleQuery(
+        entityQuery.id,
+        dispatch,
+        subscriptionApi.endpoints.getSubscription,
+      ),
+    create: (entityQuery, dispatch) =>
+      entityCompatibleQuery(
+        entityQuery,
+        dispatch,
+        subscriptionApi.endpoints.createSubscription,
+      ),
+    update: (entityQuery, dispatch) =>
+      entityCompatibleQuery(
+        entityQuery,
+        dispatch,
+        subscriptionApi.endpoints.updateSubscription,
+      ),
+    delete: () => {
+      throw new TypeError("Pulses.api.delete is not supported");
+    },
+  },
+
   objectActions: {
-    setArchived: ({ id }, archived, opts) =>
-      Pulses.actions.update(
+    setArchived: ({ id }, archived, opts) => {
+      return Pulses.actions.update(
         { id },
         { archived },
-        undo(opts, "pulse", archived ? "archived" : "unarchived"),
-      ),
-
-    setCollection: ({ id }, collection, opts) =>
-      Pulses.actions.update(
-        { id },
-        { collection_id: canonicalCollectionId(collection && collection.id) },
-        undo(opts, "pulse", "moved"),
-      ),
-
-    setPinned: ({ id }, pinned, opts) =>
-      Pulses.actions.update(
-        { id },
-        {
-          collection_position:
-            typeof pinned === "number" ? pinned : pinned ? 1 : null,
-        },
-        opts,
-      ),
+        undo(opts, t`subscription`, archived ? t`deleted` : t`restored`),
+      );
+    },
   },
 
   objectSelectors: {
-    getName: pulse => pulse && pulse.name,
-    getUrl: pulse => pulse && Urls.pulse(pulse.id),
-    getIcon: pulse => "pulse",
-    getColor: pulse => color("pulse"),
-  },
-
-  form: {
-    fields: [
-      { name: "name" },
-      {
-        name: "collection_id",
-        title: "Collection",
-        type: "collection",
-      },
-    ],
+    getName: (pulse) => pulse && pulse.name,
+    getColor: (pulse) => color("pulse"),
   },
 
   getAnalyticsMetadata([object], { action }, getState) {
@@ -61,4 +78,6 @@ const Pulses = createEntity({
   },
 });
 
-export default Pulses;
+const useGetQuery = ({ id }, options) => {
+  return useGetSubscriptionQuery(id, options);
+};

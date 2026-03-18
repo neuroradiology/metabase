@@ -1,29 +1,31 @@
 (ns metabase.driver.sqlite
-  (:require [clojure.string :as str]
-            [honeysql
-             [core :as hsql]
-             [format :as hformat]]
-            [java-time :as t]
-            [metabase
-             [config :as config]
-             [driver :as driver]]
-            [metabase.driver
-             [common :as driver.common]
-             [sql :as sql]]
-            [metabase.driver.sql-jdbc
-             [connection :as sql-jdbc.conn]
-             [execute :as sql-jdbc.execute]
-             [sync :as sql-jdbc.sync]]
-            [metabase.driver.sql.parameters.substitution :as params.substitution]
-            [metabase.driver.sql.query-processor :as sql.qp]
-            [metabase.query-processor.timezone :as qp.timezone]
-            [metabase.util
-             [date-2 :as u.date]
-             [honeysql-extensions :as hx]]
-            [schema.core :as s])
-  (:import [java.sql Connection ResultSet Types]
-           [java.time LocalDate LocalDateTime LocalTime OffsetDateTime OffsetTime ZonedDateTime]
-           java.time.temporal.Temporal))
+  (:refer-clojure :exclude [mapv])
+  (:require
+   [clojure.java.io :as io]
+   [clojure.math :as math]
+   [clojure.set :as set]
+   [clojure.string :as str]
+   [java-time.api :as t]
+   [metabase.driver :as driver]
+   [metabase.driver-api.core :as driver-api]
+   [metabase.driver.sql :as driver.sql]
+   [metabase.driver.sql-jdbc.connection :as sql-jdbc.conn]
+   [metabase.driver.sql-jdbc.execute :as sql-jdbc.execute]
+   [metabase.driver.sql-jdbc.sync :as sql-jdbc.sync]
+   [metabase.driver.sql-jdbc.sync.describe-table :as sql-jdbc.describe-table]
+   [metabase.driver.sql.parameters.substitution :as sql.params.substitution]
+   [metabase.driver.sql.query-processor :as sql.qp]
+   [metabase.util.date-2 :as u.date]
+   [metabase.util.honey-sql-2 :as h2x]
+   [metabase.util.i18n :refer [tru]]
+   [metabase.util.malli :as mu]
+   [metabase.util.performance :refer [mapv]])
+  (:import
+   (java.sql Connection ResultSet Types)
+   (java.time LocalDate LocalDateTime LocalTime OffsetDateTime OffsetTime ZonedDateTime)
+   (java.time.temporal Temporal)))
+
+(set! *warn-on-reflection* true)
 
 (driver/register! :sqlite, :parent :sql-jdbc)
 
@@ -33,16 +35,43 @@
                               :regex                                  false
                               :percentile-aggregations                false
                               :advanced-math-expressions              false
-                              :standard-deviation-aggregations        false}]
-  (defmethod driver/supports? [:sqlite feature] [_ _] supported?))
+                              :standard-deviation-aggregations        false
+                              :schemas                                false
+                              :datetime-diff                          true
+                              :expression-literals                    true
+                              :now                                    true
+                              :identifiers-with-spaces                true
+                              ;; SQLite `LIKE` clauses are case-insensitive by default, and thus cannot be made case-sensitive. So let people know
+                              ;; we have this 'feature' so the frontend doesn't try to present the option to you.
+                              :case-sensitivity-string-filter-options false
+                              ;; Index sync is turned off across the application as it is not used ATM.
+                              :index-info                             false
+                              :database-routing                       true
+                              :describe-default-expr                  true
+                              :describe-is-nullable                   true
+                              :describe-is-generated                  true}]
+  (defmethod driver/database-supports? [:sqlite feature] [_driver _feature _db] supported?))
 
-;; SQLite `LIKE` clauses are case-insensitive by default, and thus cannot be made case-sensitive. So let people know
-;; we have this 'feature' so the frontend doesn't try to present the option to you.
-(defmethod driver/supports? [:sqlite :case-sensitivity-string-filter-options] [_ _] false)
+;; Every SQLite3 file starts with "SQLite Format 3"
+;; or "** This file contains an SQLite
+;; There is also SQLite2 but last 2 version was 2005
+(defn- confirm-file-is-sqlite [filename]
+  (with-open [reader (io/input-stream filename)]
+    (let [outarr (byte-array 50)]
+      (.read reader outarr)
+      (let [line (String. outarr)]
+        (or (str/includes? line "SQLite format 3")
+            (str/includes? line "This file contains an SQLite"))))))
 
-;; HACK SQLite doesn't support ALTER TABLE ADD CONSTRAINT FOREIGN KEY and I don't have all day to work around this so
-;; for now we'll just skip the foreign key stuff in the tests.
-(defmethod driver/supports? [:sqlite :foreign-keys] [_ _] (not config/is-test?))
+(defmethod driver/can-connect? :sqlite
+  [driver details]
+  (if (confirm-file-is-sqlite (:db details))
+    (sql-jdbc.conn/can-connect? driver details)
+    false))
+
+(defmethod driver/db-start-of-week :sqlite
+  [_]
+  :sunday)
 
 (defmethod sql-jdbc.conn/connection-details->spec :sqlite
   [_ {:keys [db]
@@ -50,7 +79,22 @@
       :as   details}]
   (merge {:subprotocol "sqlite"
           :subname     db}
-         (dissoc details :db)))
+         (dissoc details :db)
+         ;; disallow "FDW" (connecting to other SQLite databases on the local filesystem) -- see https://github.com/metabase/metaboat/issues/152
+         {:limit_attached 0}))
+
+(defmethod driver/describe-table-indexes :sqlite
+  [driver database table]
+  (let [pk (first (sql-jdbc.execute/do-with-connection-with-options
+                   driver database nil
+                   (fn [conn]
+                     (sql-jdbc.describe-table/get-table-pks :sqlite conn nil table))))]
+    ;; In sqlite a PK will implicitly have a UNIQUE INDEX, but if the PK is integer the getIndexInfo method from
+    ;; jdbc doesn't return it as indexed. so we need to manually get mark the pk as indexed here
+    (cond-> ((get-method driver/describe-table-indexes :sql-jdbc) driver database table)
+      (some? pk)
+      (set/union #{{:type :normal-column-index
+                    :value pk}}))))
 
 ;; We'll do regex pattern matching here for determining Field types because SQLite types can have optional lengths,
 ;; e.g. NVARCHAR(100) or NUMERIC(10,5) See also http://www.sqlite.org/datatype3.html
@@ -64,7 +108,7 @@
     [#"CLOB"      :type/Text]
     [#"BLOB"      :type/*]
     [#"REAL"      :type/Float]
-    [#"DOUB"      :type/Float]
+    [#"DOUB"      :type/Float] ; codespell:ignore
     [#"FLOA"      :type/Float]
     [#"NUMERIC"   :type/Float]
     [#"DECIMAL"   :type/Decimal]
@@ -78,78 +122,104 @@
   [_ database-type]
   (database-type->base-type database-type))
 
-;; register the SQLite concatnation operator `||` with HoneySQL as `sqlite-concat`
-;; (hsql/format (hsql/call :sqlite-concat :a :b)) -> "(a || b)"
-(defmethod hformat/fn-handler "sqlite-concat"
-  [_ & args]
-  (str "(" (str/join " || " (map hformat/to-sql args)) ")"))
+;; The normal SELECT * FROM table WHERE 1 <> 1 LIMIT 0 query doesn't return any information for SQLite views -- it
+;; seems to be the case that the query has to return at least one row
+(defmethod sql-jdbc.sync/fallback-metadata-query :sqlite
+  [driver _db-name-or-nil _schema-name table-name]
+  (sql.qp/format-honeysql driver {:select [:*]
+                                  :from   [[(h2x/identifier :table table-name)]]
+                                  :limit  1}))
 
-(def ^:private ->date     (partial hsql/call :date))
-(def ^:private ->datetime (partial hsql/call :datetime))
+(defn- ->date [& args]
+  (-> (into [:date] args)
+      (h2x/with-database-type-info "date")))
+
+(defn- ->datetime [& args]
+  (-> (into [:datetime] args)
+      (h2x/with-database-type-info "datetime")))
+
+(defn- ->time [& args]
+  (-> (into [:time] args)
+      (h2x/with-database-type-info "time")))
 
 (defn- strftime [format-str expr]
-  (hsql/call :strftime (hx/literal format-str) expr))
+  [:strftime (h2x/literal format-str) expr])
 
 ;; See also the [SQLite Date and Time Functions Reference](http://www.sqlite.org/lang_datefunc.html).
 
-(defmethod sql.qp/date [:sqlite :default]
-  [driver _ expr]
-  (sql.qp/->honeysql driver expr))
+(defmethod sql.qp/date [:sqlite :default] [_driver _unit expr] expr)
 
 (defmethod sql.qp/date [:sqlite :second]
-  [driver _ expr]
-  (->datetime (strftime "%Y-%m-%d %H:%M:%S" (sql.qp/->honeysql driver expr))))
+  [_driver _unit expr]
+  (if (= (h2x/database-type expr) "time")
+    (->time (strftime "%H:%M:%S" expr))
+    (->datetime (strftime "%Y-%m-%d %H:%M:%S" expr))))
+
+(defmethod sql.qp/date [:sqlite :second-of-minute]
+  [_driver _unit expr]
+  (h2x/->integer (strftime "%S" expr)))
 
 (defmethod sql.qp/date [:sqlite :minute]
-  [driver _ expr]
-  (->datetime (strftime "%Y-%m-%d %H:%M" (sql.qp/->honeysql driver expr))))
+  [_driver _unit expr]
+  (if (= (h2x/database-type expr) "time")
+    (->time (strftime "%H:%M" expr))
+    (->datetime (strftime "%Y-%m-%d %H:%M" expr))))
 
 (defmethod sql.qp/date [:sqlite :minute-of-hour]
-  [driver _ expr]
-  (hx/->integer (strftime "%M" (sql.qp/->honeysql driver expr))))
+  [_driver _ expr]
+  (h2x/->integer (strftime "%M" expr)))
 
 (defmethod sql.qp/date [:sqlite :hour]
-  [driver _ expr]
-  (->datetime (strftime "%Y-%m-%d %H:00" (sql.qp/->honeysql driver expr))))
+  [_driver _unit expr]
+  (if (= (h2x/database-type expr) "time")
+    (->time (strftime "%H:00" expr))
+    (->datetime (strftime "%Y-%m-%d %H:00" expr))))
 
 (defmethod sql.qp/date [:sqlite :hour-of-day]
-  [driver _ expr]
-  (hx/->integer (strftime "%H" (sql.qp/->honeysql driver expr))))
+  [_driver _ expr]
+  (h2x/->integer (strftime "%H" expr)))
 
 (defmethod sql.qp/date [:sqlite :day]
-  [driver _ expr]
-  (->date (sql.qp/->honeysql driver expr)))
+  [_driver _ expr]
+  (->date expr))
 
 ;; SQLite day of week (%w) is Sunday = 0 <-> Saturday = 6. We want 1 - 7 so add 1
 (defmethod sql.qp/date [:sqlite :day-of-week]
-  [driver _ expr]
-  (hx/->integer (hx/inc (strftime "%w" (sql.qp/->honeysql driver expr)))))
+  [_driver _ expr]
+  (sql.qp/adjust-day-of-week :sqlite (h2x/->integer (h2x/inc (strftime "%w" expr)))))
 
 (defmethod sql.qp/date [:sqlite :day-of-month]
-  [driver _ expr]
-  (hx/->integer (strftime "%d" (sql.qp/->honeysql driver expr))))
+  [_driver _ expr]
+  (h2x/->integer (strftime "%d" expr)))
 
 (defmethod sql.qp/date [:sqlite :day-of-year]
-  [driver _ expr]
-  (hx/->integer (strftime "%j" (sql.qp/->honeysql driver expr))))
+  [_driver _ expr]
+  (h2x/->integer (strftime "%j" expr)))
 
-;; Move back 6 days, then forward to the next Sunday
 (defmethod sql.qp/date [:sqlite :week]
-  [driver _ expr]
-  (->date (sql.qp/->honeysql driver expr) (hx/literal "-6 days") (hx/literal "weekday 0")))
+  [_ _ expr]
+  (let [week-extract-fn (fn [expr]
+                          ;; Move back 6 days, then forward to the next Sunday
+                          (->date expr
+                                  (h2x/literal "-6 days")
+                                  (h2x/literal "weekday 0")))]
+    (sql.qp/adjust-start-of-week :sqlite week-extract-fn expr)))
 
-;; SQLite first week of year is 0, so add 1
-(defmethod sql.qp/date [:sqlite :week-of-year]
+(defmethod sql.qp/date [:sqlite :week-of-year-iso]
   [driver _ expr]
-  (hx/->integer (hx/inc (strftime "%W" (sql.qp/->honeysql driver expr)))))
+  ;; Maybe we can follow the algorithm here https://en.wikipedia.org/wiki/ISO_week_date#Algorithms
+  (throw (ex-info (tru "Sqlite doesn''t support extract isoweek")
+                  {:driver driver
+                   :form   expr
+                   :type   driver-api/qp.error-type.invalid-query})))
 
 (defmethod sql.qp/date [:sqlite :month]
-  [driver _ expr]
-  (->date (sql.qp/->honeysql driver expr) (hx/literal "start of month")))
+  [_driver _ expr]
+  (->date expr (h2x/literal "start of month")))
 
 (defmethod sql.qp/date [:sqlite :month-of-year]
-  [driver _ expr]
-  (hx/->integer (strftime "%m" (sql.qp/->honeysql driver expr))))
+  [_driver _ expr]
+  (h2x/->integer (strftime "%m" expr)))
 
 ;;    DATE(DATE(%s, 'start of month'), '-' || ((STRFTIME('%m', %s) - 1) % 3) || ' months')
 ;; -> DATE(DATE('2015-11-16', 'start of month'), '-' || ((STRFTIME('%m', '2015-11-16') - 1) % 3) || ' months')
@@ -158,29 +228,32 @@
 ;; -> DATE('2015-11-01', '-1 months')
 ;; -> '2015-10-01'
 (defmethod sql.qp/date [:sqlite :quarter]
-  [driver _ expr]
-  (let [v (sql.qp/->honeysql driver expr)]
-    (->date
-     (->date v (hx/literal "start of month"))
-     (hsql/call :sqlite-concat
-       (hx/literal "-")
-       (hx/mod (hx/dec (strftime "%m" v))
-               3)
-       (hx/literal " months")))))
+  [_driver _ expr]
+  (->date
+   (->date expr (h2x/literal "start of month"))
+   [:||
+    (h2x/literal "-")
+    (h2x/mod (h2x/dec (strftime "%m" expr))
+             3)
+    (h2x/literal " months")]))
 
 ;; q = (m + 2) / 3
 (defmethod sql.qp/date [:sqlite :quarter-of-year]
-  [driver _ expr]
-  (hx// (hx/+ (strftime "%m" (sql.qp/->honeysql driver expr))
-              2)
-        3))
+  [_driver _ expr]
+  (h2x// (h2x/+ (strftime "%m" expr)
+                2)
+         3))
 
 (defmethod sql.qp/date [:sqlite :year]
-  [driver _ expr]
-  (->date (sql.qp/->honeysql driver expr) (hx/literal "start of year")))
+  [_driver _ expr]
+  (->date expr (h2x/literal "start of year")))
+
+(defmethod sql.qp/date [:sqlite :year-of-era]
+  [_driver _ expr]
+  (h2x/->integer (strftime "%Y" expr)))
 
 (defmethod sql.qp/add-interval-honeysql-form :sqlite
-  [driver hsql-form amount unit]
+  [_driver hsql-form amount unit]
   (let [[multiplier sqlite-unit] (case unit
                                    :second  [1 "seconds"]
                                    :minute  [1 "minutes"]
@@ -190,24 +263,67 @@
                                    :month   [1 "months"]
                                    :quarter [3 "months"]
                                    :year    [1 "years"])]
-    ;; Make a string like DATETIME(DATE('now', 'start of month'), '-1 month') The date bucketing will end up being
-    ;; done twice since `date` is called on the results of `date-interval` automatically. This shouldn't be a big deal
-    ;; because it's used for relative dates and only needs to be done once.
-    ;;
-    ;; It's important to call `date` on 'now' to apply bucketing *before* adding/subtracting dates to handle certain
-    ;; edge cases as discussed in issue #2275 (https://github.com/metabase/metabase/issues/2275).
-    ;;
-    ;; Basically, March 30th minus one month becomes Feb 30th in SQLite, which becomes March 2nd.
-    ;; DATE(DATETIME('2016-03-30', '-1 month'), 'start of month') is thus March 1st.
-    ;; The SQL we produce instead (for "last month") ends up looking something like:
-    ;; DATE(DATETIME(DATE('2015-03-30', 'start of month'), '-1 month'), 'start of month').
-    ;; It's a little verbose, but gives us the correct answer (Feb 1st).
-    (->datetime (sql.qp/date driver unit hsql-form)
-                (hx/literal (format "%+d %s" (* amount multiplier) sqlite-unit)))))
+    (->datetime hsql-form (h2x/literal (format "%+d %s" (* amount multiplier) sqlite-unit)))))
 
 (defmethod sql.qp/unix-timestamp->honeysql [:sqlite :seconds]
-  [_ _ expr]
-  (->datetime expr (hx/literal "unixepoch")))
+  [_driver _precision expr]
+  (->datetime expr (h2x/literal "unixepoch")))
+
+(defn- unix-timestamp->honeysql [expr power]
+  (let [divisor       (long (math/pow 10 power))
+        format-string (format "%%0%dd" power)]
+    [:concat
+     (->datetime (h2x// expr divisor) (h2x/literal "unixepoch"))
+     (h2x/literal ".")
+     [:printf
+      (h2x/literal format-string)
+      (h2x/mod expr divisor)]]))
+
+(defmethod sql.qp/unix-timestamp->honeysql [:sqlite :milliseconds] [_driver _precision expr] (unix-timestamp->honeysql expr 3))
+(defmethod sql.qp/unix-timestamp->honeysql [:sqlite :microseconds] [_driver _precision expr] (unix-timestamp->honeysql expr 6))
+(defmethod sql.qp/unix-timestamp->honeysql [:sqlite :nanoseconds]  [_driver _precision expr] (unix-timestamp->honeysql expr 9))
+
+(defmethod sql.qp/cast-temporal-string [:sqlite :Coercion/ISO8601->DateTime]
+  [_driver _semantic-type expr]
+  (->datetime expr))
+
+(defmethod sql.qp/cast-temporal-string [:sqlite :Coercion/ISO8601->Date]
+  [_driver _semantic-type expr]
+  (->date expr))
+
+(defmethod sql.qp/cast-temporal-string [:sqlite :Coercion/ISO8601->Time]
+  [_driver _semantic-type expr]
+  (->time expr))
+
+(defmethod sql.qp/cast-temporal-string [:sqlite :Coercion/YYYYMMDDHHMMSSString->Temporal]
+  [_driver _coercion-strategy expr]
+  (h2x/with-database-type-info [:concat
+                                [:substr expr 1 4]
+                                "-"
+                                [:substr expr 5 2]
+                                "-"
+                                [:substr expr 7 2]
+                                " "
+                                [:substr expr 9 2]
+                                ":"
+                                [:substr expr 11 2]
+                                ":"
+                                [:substr expr 13 2]]
+                               "timestamp"))
+
+(defmethod sql.qp/cast-temporal-byte [:sqlite :Coercion/YYYYMMDDHHMMSSBytes->Temporal]
+  [driver _coercion-strategy expr]
+  (sql.qp/cast-temporal-string driver :Coercion/YYYYMMDDHHMMSSString->Temporal
+                               (h2x/cast "TEXT" expr)))
+
+(defmethod sql.qp/cast-temporal-byte [:sqlite :Coercion/ISO8601Bytes->Temporal]
+  [driver _coercion-strategy expr]
+  (sql.qp/cast-temporal-string driver :Coercion/ISO8601->DateTime
+                               (h2x/cast "TEXT" expr)))
+
+(defmethod sql.qp/->date :sqlite
+  [_driver value]
+  (->date value))
 
 ;; SQLite doesn't like Temporal values getting passed in as prepared statement args, so we need to convert them to
 ;; date literal strings instead to get things to work
@@ -217,12 +333,12 @@
 ;;
 ;; TIMESTAMP FIXME — this doesn't seem like the correct thing to do for non-Dates. I think params only support dates
 ;; rn however
-(s/defmethod sql/->prepared-substitution [:sqlite Temporal] :- sql/PreparedStatementSubstitution
-  [_ date]
+(mu/defmethod driver.sql/->prepared-substitution [:sqlite Temporal] :- driver.sql/PreparedStatementSubstitution
+  [_driver date]
   ;; for anything that's a Temporal value convert it to a yyyy-MM-dd formatted date literal
   ;; string For whatever reason the SQL generated from parameters ends up looking like `WHERE date(some_field) = ?`
   ;; sometimes so we need to use just the date rather than a full ISO-8601 string
-  (params.substitution/make-stmt-subs "?" [(t/format "yyyy-MM-dd" date)]))
+  (sql.params.substitution/make-stmt-subs "?" [(t/format "yyyy-MM-dd" date)]))
 
 ;; SQLite doesn't support `TRUE`/`FALSE`; it uses `1`/`0`, respectively; convert these booleans to numbers.
 (defmethod sql.qp/->honeysql [:sqlite Boolean]
@@ -232,26 +348,26 @@
 (defmethod sql.qp/->honeysql [:sqlite :substring]
   [driver [_ arg start length]]
   (if length
-    (hsql/call :substr (sql.qp/->honeysql driver arg) (sql.qp/->honeysql driver start) (sql.qp/->honeysql driver length))
-    (hsql/call :substr (sql.qp/->honeysql driver arg) (sql.qp/->honeysql driver start))))
+    [:substr (sql.qp/->honeysql driver arg) (sql.qp/->honeysql driver start) (sql.qp/->honeysql driver length)]
+    [:substr (sql.qp/->honeysql driver arg) (sql.qp/->honeysql driver start)]))
 
 (defmethod sql.qp/->honeysql [:sqlite :concat]
   [driver [_ & args]]
-  (hsql/raw (str/join " || " (for [arg args]
-                               (let [arg (sql.qp/->honeysql driver arg)]
-                                 (hformat/to-sql
-                                  (if (string? arg)
-                                    (hx/literal arg)
-                                    arg)))))))
+  (into
+   [:||]
+   (mapv (partial sql.qp/->honeysql driver) args)))
 
 (defmethod sql.qp/->honeysql [:sqlite :floor]
-  [driver [_ arg]]
-  (hsql/call :round (hsql/call :- arg 0.5)))
+  [_driver [_ arg]]
+  [:round (h2x/- arg 0.5)])
 
 (defmethod sql.qp/->honeysql [:sqlite :ceil]
-  [driver [_ arg]]
-  (hsql/call :round (hsql/call :+ arg 0.5)))
-
+  [_driver [_ arg]]
+  [:case
+   ;; if we're ceiling a whole number, just cast it to an integer
+   ;; [:ceil 1.0] should returns 1
+   [:= [:round arg] arg] (h2x/->integer arg)
+   :else                 [:round (h2x/+ arg 0.5)]])
 
 ;; See https://sqlite.org/lang_datefunc.html
 
@@ -266,46 +382,38 @@
 
 (defmethod sql.qp/->honeysql [:sqlite LocalDate]
   [_ t]
-  (hsql/call :date (hx/literal (u.date/format-sql t))))
+  [:date (h2x/literal (u.date/format-sql t))])
 
 (defmethod sql.qp/->honeysql [:sqlite LocalDateTime]
   [driver t]
   (if (zero-time? t)
     (sql.qp/->honeysql driver (t/local-date t))
-    (hsql/call :datetime (hx/literal (u.date/format-sql t)))))
+    [:datetime (h2x/literal (u.date/format-sql t))]))
 
 (defmethod sql.qp/->honeysql [:sqlite LocalTime]
   [_ t]
-  (hsql/call :time (hx/literal (u.date/format-sql t))))
+  [:time (h2x/literal (u.date/format-sql t))])
 
 (defmethod sql.qp/->honeysql [:sqlite OffsetDateTime]
   [driver t]
   (if (zero-time? t)
     (sql.qp/->honeysql driver (t/local-date t))
-    (hsql/call :datetime (hx/literal (u.date/format-sql t)))))
+    [:datetime (h2x/literal (u.date/format-sql t))]))
 
 (defmethod sql.qp/->honeysql [:sqlite OffsetTime]
   [_ t]
-  (hsql/call :time (hx/literal (u.date/format-sql t))))
+  [:time (h2x/literal (u.date/format-sql t))])
 
 (defmethod sql.qp/->honeysql [:sqlite ZonedDateTime]
   [driver t]
   (if (zero-time? t)
     (sql.qp/->honeysql driver (t/local-date t))
-    (hsql/call :datetime (hx/literal (u.date/format-sql t)))))
+    [:datetime (h2x/literal (u.date/format-sql t))]))
 
 ;; SQLite defaults everything to UTC
-(defmethod driver.common/current-db-time-date-formatters :sqlite
-  [_]
-  (driver.common/create-db-time-formatters "yyyy-MM-dd HH:mm:ss"))
-
-(defmethod driver.common/current-db-time-native-query :sqlite
-  [_]
-  "select cast(datetime('now') as text);")
-
-(defmethod driver/current-db-time :sqlite
-  [& args]
-  (apply driver.common/current-db-time args))
+(defmethod driver/db-default-timezone :sqlite
+  [_driver _database]
+  "UTC")
 
 (defmethod sql-jdbc.sync/active-tables :sqlite
   [& args]
@@ -313,18 +421,69 @@
 
 (defmethod sql.qp/current-datetime-honeysql-form :sqlite
   [_]
-  (hsql/call :datetime (hx/literal :now)))
+  [:datetime (h2x/literal :now)])
 
-;; SQLite's JDBC driver is fussy and won't let you change connections to read-only after you create them
-(defmethod sql-jdbc.execute/connection-with-timezone :sqlite
-  [driver database ^String timezone-id]
-  (let [conn (.getConnection (sql-jdbc.execute/datasource database))]
-    (try
-      (sql-jdbc.execute/set-best-transaction-level! driver conn)
-      conn
-      (catch Throwable e
-        (.close conn)
-        (throw e)))))
+(defmethod sql.qp/datetime-diff [:sqlite :year]
+  [driver _unit x y]
+  (h2x// (sql.qp/datetime-diff driver :month x y) 12))
+
+(defmethod sql.qp/datetime-diff [:sqlite :quarter]
+  [driver _unit x y]
+  (h2x// (sql.qp/datetime-diff driver :month x y) 3))
+
+(defmethod sql.qp/datetime-diff [:sqlite :month]
+  [driver _unit x y]
+  (let [extract            (fn [unit x] (sql.qp/date driver unit x))
+        year-diff          (h2x/- (extract :year y) (extract :year x))
+        month-of-year-diff (h2x/- (extract :month-of-year y) (extract :month-of-year x))
+        total-month-diff   (h2x/+ month-of-year-diff (h2x/* year-diff 12))]
+    (h2x/+ total-month-diff
+          ;; total-month-diff counts month boundaries not whole months, so we need to adjust
+          ;; if x<y but x>y in the month calendar then subtract one month
+          ;; if x>y but x<y in the month calendar then add one month
+           [:case
+            [:and [:< x y] [:> (extract :day-of-month x) (extract :day-of-month y)]]
+            -1
+            [:and [:> x y] [:< (extract :day-of-month x) (extract :day-of-month y)]]
+            1
+            :else 0])))
+
+(defmethod sql.qp/datetime-diff [:sqlite :week]
+  [driver _unit x y]
+  (h2x// (sql.qp/datetime-diff driver :day x y) 7))
+
+(defmethod sql.qp/datetime-diff [:sqlite :day]
+  [_driver _unit x y]
+  (h2x/->integer
+   (h2x/- [:julianday y (h2x/literal "start of day")]
+          [:julianday x (h2x/literal "start of day")])))
+
+(defmethod sql.qp/datetime-diff [:sqlite :hour]
+  [driver _unit x y]
+  (h2x// (sql.qp/datetime-diff driver :second x y) 3600))
+
+(defmethod sql.qp/datetime-diff [:sqlite :minute]
+  [driver _unit x y]
+  (h2x// (sql.qp/datetime-diff driver :second x y) 60))
+
+(defmethod sql.qp/datetime-diff [:sqlite :second]
+  [_driver _unit x y]
+  ;; strftime strftime('%s', <timestring>) returns the unix time as an integer.
+  (h2x/- (strftime "%s" y) (strftime "%s" x)))
+
+;; SQLite's JDBC driver is fussy and won't let you change connections to read-only after you create them. So skip that
+;; step. SQLite doesn't have a notion of session timezones so don't do that either. The only thing we're doing here from
+;; the default impl is setting the transaction isolation level
+(defmethod sql-jdbc.execute/do-with-connection-with-options :sqlite
+  [driver db-or-id-or-spec options f]
+  (sql-jdbc.execute/do-with-resolved-connection
+   driver
+   db-or-id-or-spec
+   options
+   (fn [^Connection conn]
+     (when-not (sql-jdbc.execute/recursive-connection?)
+       (sql-jdbc.execute/set-best-transaction-level! driver conn))
+     (f conn))))
 
 ;; SQLite's JDBC driver is dumb and complains if you try to call `.setFetchDirection` on the Connection
 (defmethod sql-jdbc.execute/prepared-statement :sqlite
@@ -340,14 +499,37 @@
         (.close stmt)
         (throw e)))))
 
-;; (.getObject rs i LocalDate) doesn't seem to work, nor does `(.getDate)`; and it seems to be the case that
-;; timestamps come back as `Types/DATE` as well? Fetch them as a String and then parse them
+;; SQLite has no intrinsic date/time type. The sqlite-jdbc driver provides the following de-facto mappings:
+;;    DATE or DATETIME => Types/DATE (only if type is int or string)
+;;    TIMESTAMP => Types/TIMESTAMP (only if type is int)
+;; The data itself can be stored either as
+;;    1) integer (unix epoch) - this is "point in time", so no confusion about timezone
+;;    2) float (julian days) - this is "point in time", so no confusion about timezone
+;;    3) string (ISO8601) - zoned or unzoned depending on content, sqlite-jdbc always treat it as local time
+;; Note that it is possible to store other invalid data in the column as SQLite does not perform any validation.
+(defn- sqlite-handle-timestamp
+  [^ResultSet rs ^Integer i]
+  (let [obj (.getObject rs i)]
+    (cond
+      ;; For strings, use our own parser which is more flexible than sqlite-jdbc's and handles timezones correctly
+      (instance? String obj) (u.date/parse obj)
+      ;; For other types, fallback to sqlite-jdbc's parser
+      ;; Even in DATE column, it is possible to put DATETIME, so always treat as DATETIME
+      (some? obj) (t/local-date-time (.getTimestamp rs i)))))
+
 (defmethod sql-jdbc.execute/read-column-thunk [:sqlite Types/DATE]
   [_ ^ResultSet rs _ ^Integer i]
   (fn []
-    (try
-      (when-let [t (.getDate rs i)]
-        (t/local-date t))
-      (catch Throwable _
-        (when-let [s (.getString rs i)]
-          (u.date/parse s (qp.timezone/results-timezone-id)))))))
+    (sqlite-handle-timestamp rs i)))
+
+(defmethod sql-jdbc.execute/read-column-thunk [:sqlite Types/TIMESTAMP]
+  [_ ^ResultSet rs _ ^Integer i]
+  (fn []
+    (sqlite-handle-timestamp rs i)))
+
+(defmethod sql.qp/->integer :sqlite
+  [driver value]
+  (sql.qp/->integer-with-round driver value))
+
+(defmethod driver/llm-sql-dialect-resource :sqlite [_]
+  "llm/prompts/dialects/sqlite.md")

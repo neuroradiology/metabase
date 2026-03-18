@@ -1,13 +1,10 @@
+import { deserializeCardFromUrl, serializeCardForUrl } from "metabase/lib/card";
 import {
-  createCard,
-  utf8_to_b64,
   b64_to_utf8,
-  utf8_to_b64url,
   b64url_to_utf8,
-  isCardDirty,
-  serializeCardForUrl,
-  deserializeCardFromUrl,
-} from "metabase/lib/card";
+  utf8_to_b64,
+  utf8_to_b64url,
+} from "metabase/lib/encoding";
 
 const CARD_ID = 31;
 
@@ -55,26 +52,6 @@ const getCard = ({
 };
 
 describe("lib/card", () => {
-  describe("createCard", () => {
-    it("should return a new card", () => {
-      expect(createCard()).toEqual({
-        name: null,
-        display: "table",
-        visualization_settings: {},
-        dataset_query: {},
-      });
-    });
-
-    it("should set the name if supplied", () => {
-      expect(createCard("something")).toEqual({
-        name: "something",
-        display: "table",
-        visualization_settings: {},
-        dataset_query: {},
-      });
-    });
-  });
-
   describe("utf8_to_b64", () => {
     it("should encode with non-URL-safe characters", () => {
       expect(utf8_to_b64("  ?").indexOf("/")).toEqual(3);
@@ -83,7 +60,7 @@ describe("lib/card", () => {
   });
 
   describe("b64_to_utf8", () => {
-    it("should decode corretly", () => {
+    it("should decode correctly", () => {
       expect(b64_to_utf8("ICA/")).toEqual("  ?");
     });
   });
@@ -96,42 +73,11 @@ describe("lib/card", () => {
   });
 
   describe("b64url_to_utf8", () => {
-    it("should decode corretly", () => {
+    it("should decode correctly", () => {
       expect(b64url_to_utf8("ICA_")).toEqual("  ?");
     });
   });
 
-  describe("isCardDirty", () => {
-    it("should consider a new card clean if no db table or native query is defined", () => {
-      expect(isCardDirty(getCard({ newCard: true }), null)).toBe(false);
-    });
-    it("should consider a new card dirty if a db table is chosen", () => {
-      expect(isCardDirty(getCard({ newCard: true, table: 5 }), null)).toBe(
-        true,
-      );
-    });
-    it("should consider a new card dirty if there is any content on the native query", () => {
-      expect(isCardDirty(getCard({ newCard: true, table: 5 }), null)).toBe(
-        true,
-      );
-    });
-    it("should consider a saved card and a matching original card identical", () => {
-      expect(
-        isCardDirty(
-          getCard({ hasOriginalCard: true }),
-          getCard({ hasOriginalCard: false }),
-        ),
-      ).toBe(false);
-    });
-    it("should consider a saved card dirty if the current card doesn't match the last saved version", () => {
-      expect(
-        isCardDirty(
-          getCard({ hasOriginalCard: true, queryFields: [["field-id", 21]] }),
-          getCard({ hasOriginalCard: false }),
-        ),
-      ).toBe(true);
-    });
-  });
   describe("serializeCardForUrl", () => {
     it("should include `original_card_id` property to the serialized URL", () => {
       const cardAfterSerialization = deserializeCardFromUrl(

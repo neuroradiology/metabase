@@ -1,13 +1,14 @@
 /* eslint "react/prop-types": "warn" */
-import React, { Component } from "react";
+import cx from "classnames";
 import PropTypes from "prop-types";
-import { connect } from "react-redux";
+import { Component } from "react";
 
-import BaseSidebar from "metabase/reference/guide/BaseSidebar";
-import SidebarLayout from "metabase/components/SidebarLayout";
-import DatabaseList from "metabase/reference/databases/DatabaseList";
-
+import { SidebarLayout } from "metabase/common/components/SidebarLayout";
+import CS from "metabase/css/core/index.css";
+import { connect } from "metabase/lib/redux";
 import * as metadataActions from "metabase/redux/metadata";
+import DatabaseList from "metabase/reference/databases/DatabaseList";
+import BaseSidebar from "metabase/reference/guide/BaseSidebar";
 import * as actions from "metabase/reference/reference";
 
 import { getDatabaseId, getIsEditing } from "../selectors";
@@ -22,27 +23,23 @@ const mapDispatchToProps = {
   ...actions,
 };
 
-@connect(
-  mapStateToProps,
-  mapDispatchToProps,
-)
-export default class DatabaseListContainer extends Component {
+class DatabaseListContainer extends Component {
   static propTypes = {
     params: PropTypes.object.isRequired,
-    databaseId: PropTypes.number.isRequired,
     location: PropTypes.object.isRequired,
-    isEditing: PropTypes.bool,
+    database: PropTypes.object.isRequired,
+    databaseId: PropTypes.number.isRequired,
   };
 
   async fetchContainerData() {
     await actions.wrappedFetchDatabases(this.props);
   }
 
-  componentWillMount() {
+  UNSAFE_componentWillMount() {
     this.fetchContainerData();
   }
 
-  componentWillReceiveProps(newProps) {
+  UNSAFE_componentWillReceiveProps(newProps) {
     if (this.props.location.pathname === newProps.location.pathname) {
       return;
     }
@@ -51,12 +48,9 @@ export default class DatabaseListContainer extends Component {
   }
 
   render() {
-    const { isEditing } = this.props;
-
     return (
       <SidebarLayout
-        className="flex-full relative"
-        style={isEditing ? { paddingTop: "43px" } : {}}
+        className={cx(CS.flexFull, CS.relative)}
         sidebar={<BaseSidebar />}
       >
         <DatabaseList {...this.props} />
@@ -64,3 +58,9 @@ export default class DatabaseListContainer extends Component {
     );
   }
 }
+
+// eslint-disable-next-line import/no-default-export -- deprecated usage
+export default connect(
+  mapStateToProps,
+  mapDispatchToProps,
+)(DatabaseListContainer);
